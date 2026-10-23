@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Copy,
   Check,
@@ -6,8 +6,15 @@ import {
   ArrowLeft,
   Paperclip,
   User,
+  Volume2,
+  Square,
 } from 'lucide-react';
-import { ChatSession } from '../utils/dashboardLogic';
+import {
+  ChatSession,
+  detectSpeechLanguage,
+  stripMarkdownForSpeech,
+  selectBestVoiceForLanguage,
+} from '../utils/dashboardLogic';
 import { ChatComposer } from './ChatComposer';
 
 interface ChatThreadViewProps {
@@ -32,6 +39,78 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
   onBackToWelcome,
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const fallbackTimerRef = useRef<number | null>(null);
+
+  const stopSpeechPlayback = () => {
+    if (fallbackTimerRef.current !== null) {
+      window.clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+    }
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        // Ignore errors if speechSynthesis is restricted
+      }
+    }
+    setSpeakingId(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopSpeechPlayback();
+    };
+  }, [session.id]);
+
+  const handleToggleSpeech = (msgId: string, content: string) => {
+    if (speakingId === msgId) {
+      stopSpeechPlayback();
+      return;
+    }
+
+    stopSpeechPlayback();
+    const detected = detectSpeechLanguage(content);
+    const spokenText = stripMarkdownForSpeech(content);
+    if (!spokenText) return;
+
+    setSpeakingId(msgId);
+    const startTimestamp = Date.now();
+    const fallbackDurationMs = Math.min(15000, Math.max(4000, spokenText.length * 45));
+
+    fallbackTimerRef.current = window.setTimeout(() => {
+      setSpeakingId((current) => (current === msgId ? null : current));
+      fallbackTimerRef.current = null;
+    }, fallbackDurationMs);
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window) {
+      try {
+        const utterance = new window.SpeechSynthesisUtterance(spokenText);
+        utterance.lang = detected.langCode;
+
+        const voices = window.speechSynthesis.getVoices();
+        const matchedVoice = selectBestVoiceForLanguage(voices, detected.langCode);
+        if (matchedVoice) {
+          utterance.voice = matchedVoice;
+        }
+
+        utterance.onend = () => {
+          // Only auto-clear if real audio synthesis took place (> 300ms)
+          if (Date.now() - startTimestamp > 300) {
+            if (fallbackTimerRef.current !== null) {
+              window.clearTimeout(fallbackTimerRef.current);
+              fallbackTimerRef.current = null;
+            }
+            setSpeakingId((current) => (current === msgId ? null : current));
+          }
+        };
+
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        // Fallback timer handles state reset when Web Speech API is unavailable
+      }
+    }
+  };
 
   const handleCopy = (id: string, text: string) => {
     if (navigator.clipboard) {
@@ -91,6 +170,9 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
       >
         {session.messages.map((msg) => {
           const isUser = msg.role === 'user';
+          const detectedLang = !isUser ? detectSpeechLanguage(msg.content) : null;
+          const isSpeakingThis = speakingId === msg.id;
+
           return (
             <article
               key={msg.id}
@@ -100,7 +182,7 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
                   : 'bg-white dark:bg-[#131829] border-[#E5E7EB] dark:border-slate-800 mr-auto w-full'
               }`}
             >
-              <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                 <div className="flex items-center gap-2 text-[12.5px] font-semibold text-slate-800 dark:text-slate-200">
                   {isUser ? (
                     <>
@@ -116,29 +198,82 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
                   <span className="text-[11.5px] font-normal text-slate-500 dark:text-slate-400 tabular-nums">
                     {msg.timestamp}
                   </span>
+                  {!isUser && detectedLang && (
+                    <>
+                      <span aria-hidden="true" className="text-slate-400">·</span>
+                      <span
+                        className="text-[11.5px] font-normal text-slate-500 dark:text-slate-400 font-mono"
+                        title={`Определённый язык озвучивания: ${detectedLang.fullName}`}
+                      >
+                        {detectedLang.langCode}
+                      </span>
+                    </>
+                  )}
                 </div>
 
-                {!isUser && (
-                  <button
-                    type="button"
-                    onClick={() => handleCopy(msg.id, msg.content)}
-                    aria-label="Скопировать ответ"
-                    className="focus-ring inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800"
-                  >
-                    {copiedId === msg.id ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden="true" />
-                        <span>Скопировано</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" aria-hidden="true" />
-                        <span>Копировать</span>
-                      </>
-                    )}
-                  </button>
+                {!isUser && detectedLang && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleSpeech(msg.id, msg.content)}
+                      aria-pressed={isSpeakingThis}
+                      aria-label={
+                        isSpeakingThis
+                          ? `Остановить озвучивание (${detectedLang.fullName})`
+                          : `Озвучить ответ (${detectedLang.fullName})`
+                      }
+                      title={`Голосовое воспроизведение: ${detectedLang.fullName}`}
+                      className={`focus-ring inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-medium transition-colors whitespace-nowrap ${
+                        isSpeakingThis
+                          ? 'bg-indigo-50 dark:bg-indigo-500/20 text-[#4F46E5] dark:text-indigo-300 border border-indigo-200 dark:border-indigo-500/40'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      }`}
+                    >
+                      {isSpeakingThis ? (
+                        <>
+                          <Square className="w-3 h-3 fill-current" aria-hidden="true" />
+                          <span>Стоп ({detectedLang.shortLabel})</span>
+                        </>
+                      ) : (
+                        <>
+                          <Volume2 className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Озвучить ({detectedLang.shortLabel})</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleCopy(msg.id, msg.content)}
+                      aria-label="Скопировать ответ"
+                      className="focus-ring inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11.5px] text-slate-500 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-100 hover:bg-slate-100 dark:hover:bg-slate-800 whitespace-nowrap"
+                    >
+                      {copiedId === msg.id ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-600" aria-hidden="true" />
+                          <span>Скопировано</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Копировать</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 )}
               </div>
+
+              {isSpeakingThis && detectedLang && (
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="mb-2.5 text-[12px] font-medium text-[#4F46E5] dark:text-indigo-400 flex items-center gap-1.5"
+                >
+                  <Volume2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  <span>Воспроизведение аудио · Голос: {detectedLang.fullName}</span>
+                </div>
+              )}
 
               <div className="text-[14px] leading-relaxed text-slate-800 dark:text-slate-200 whitespace-pre-wrap">
                 {msg.content}

@@ -524,3 +524,144 @@ export function validateModelParameters(params: ModelParameters): { valid: boole
   }
   return { valid: true };
 }
+
+/**
+ * Generates a safe .md filename for a chat session export.
+ */
+export function getChatMarkdownFilename(session: ChatSession): string {
+  const sanitized = session.title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-zа-яё0-9]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+  const base = sanitized || session.id || 'chat-export';
+  return `${base}.md`;
+}
+
+/**
+ * Formats a ChatSession into a structured Markdown document.
+ */
+export function formatChatSessionAsMarkdown(session: ChatSession): string {
+  const lines: string[] = [
+    `# ${session.title}`,
+    '',
+    `- **ID сессии**: \`${session.id}\``,
+    `- **Категория**: ${session.categoryId}`,
+    `- **Обновлено**: ${session.updatedAt}`,
+    `- **Сообщений**: ${session.messages.length}`,
+    '',
+    '---',
+    '',
+  ];
+
+  for (const msg of session.messages) {
+    const author = msg.role === 'user' ? 'Сотрудник' : 'ARS LLM';
+    lines.push(`### ${author} (${msg.timestamp})`);
+    lines.push('');
+    lines.push(msg.content);
+    if (msg.attachments && msg.attachments.length > 0) {
+      lines.push('');
+      lines.push(`**Вложения**: ${msg.attachments.map((f) => `\`${f}\``).join(', ')}`);
+    }
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+  }
+
+  return lines.join('\n').trimEnd() + '\n';
+}
+
+/**
+ * Encodes a ChatSession Markdown export as a downloadable UTF-8 data URI.
+ */
+export function createChatMarkdownDataUri(session: ChatSession): string {
+  const markdown = formatChatSessionAsMarkdown(session);
+  return `data:text/markdown;charset=utf-8,${encodeURIComponent(markdown)}`;
+}
+
+export type SpeechLangCode = 'ru-RU' | 'kk-KZ' | 'en-US';
+
+export interface DetectedSpeechLanguage {
+  langCode: SpeechLangCode;
+  shortLabel: 'RU' | 'KZ' | 'EN';
+  fullName: string;
+}
+
+/**
+ * Strips Markdown formatting and code blocks so Text-to-Speech reads natural prose.
+ */
+export function stripMarkdownForSpeech(markdown: string): string {
+  return markdown
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/\*([^*]+)\*/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Detects the primary language of an AI response for Text-to-Speech voice selection.
+ * Distinguishes Kazakh (kk-KZ), Russian (ru-RU), and English (en-US).
+ */
+export function detectSpeechLanguage(text: string): DetectedSpeechLanguage {
+  // Remove fenced code blocks before counting natural language characters
+  const prose = text.replace(/```[\s\S]*?```/g, ' ');
+
+  // Check for Kazakh-specific Cyrillic characters
+  const kazakhSpecificMatches = prose.match(/[әғқңөұүһіӘҒҚҢӨҰҮҺІ]/g);
+  if (kazakhSpecificMatches && kazakhSpecificMatches.length > 0) {
+    return {
+      langCode: 'kk-KZ',
+      shortLabel: 'KZ',
+      fullName: 'Қазақша (kk-KZ)',
+    };
+  }
+
+  const cyrillicMatches = prose.match(/[а-яёА-ЯЁ]/g);
+  const latinMatches = prose.match(/[a-zA-Z]/g);
+  const cyrillicCount = cyrillicMatches ? cyrillicMatches.length : 0;
+  const latinCount = latinMatches ? latinMatches.length : 0;
+
+  if (latinCount > cyrillicCount && latinCount > 0) {
+    return {
+      langCode: 'en-US',
+      shortLabel: 'EN',
+      fullName: 'English (en-US)',
+    };
+  }
+
+  return {
+    langCode: 'ru-RU',
+    shortLabel: 'RU',
+    fullName: 'Русский (ru-RU)',
+  };
+}
+
+/**
+ * Picks the best matching SpeechSynthesisVoice for a target BCP-47 language code.
+ */
+export function selectBestVoiceForLanguage<T extends { lang: string; default?: boolean }>(
+  voices: T[],
+  targetLangCode: SpeechLangCode
+): T | null {
+  if (!voices || voices.length === 0) return null;
+  const normalizedTarget = targetLangCode.toLowerCase();
+  const baseLang = normalizedTarget.split('-')[0];
+
+  const exactMatch = voices.find((v) => v.lang.toLowerCase().replace('_', '-') === normalizedTarget);
+  if (exactMatch) return exactMatch;
+
+  const prefixMatch = voices.find((v) =>
+    v.lang.toLowerCase().replace('_', '-').startsWith(`${baseLang}-`) ||
+    v.lang.toLowerCase() === baseLang
+  );
+  if (prefixMatch) return prefixMatch;
+
+  return voices.find((v) => v.default) ?? voices[0];
+}
+
+

@@ -14,6 +14,12 @@ import {
   filterWorkspaceContent,
   submitChatPrompt,
   validateModelParameters,
+  formatChatSessionAsMarkdown,
+  getChatMarkdownFilename,
+  createChatMarkdownDataUri,
+  detectSpeechLanguage,
+  stripMarkdownForSpeech,
+  selectBestVoiceForLanguage,
 } from './dashboardLogic';
 
 test('Theme toggle transitions cleanly between light and dark mode', () => {
@@ -127,3 +133,62 @@ test('Model parameters validation enforces temperature and token limits', () => 
     false
   );
 });
+
+test('Markdown export formats chat thread with metadata, messages, attachments, and safe filename', () => {
+  const session = {
+    ...INITIAL_SESSIONS[0],
+    messages: [
+      {
+        ...INITIAL_SESSIONS[0].messages[0],
+        attachments: ['schema.sql'],
+      },
+      INITIAL_SESSIONS[0].messages[1],
+    ],
+  };
+
+  const filename = getChatMarkdownFilename(session);
+  assert.ok(filename.endsWith('.md'), `Expected .md extension, got ${filename}`);
+  assert.ok(filename.includes('postgresql'), `Expected slugified title in filename, got ${filename}`);
+
+  const md = formatChatSessionAsMarkdown(session);
+  assert.ok(md.startsWith(`# ${session.title}`));
+  assert.ok(md.includes('### Сотрудник (12:04)'));
+  assert.ok(md.includes('### ARS LLM (12:05)'));
+  assert.ok(md.includes('**Вложения**: `schema.sql`'));
+
+  const dataUri = createChatMarkdownDataUri(session);
+  assert.ok(dataUri.startsWith('data:text/markdown;charset=utf-8,'));
+  assert.equal(decodeURIComponent(dataUri.replace('data:text/markdown;charset=utf-8,', '')), md);
+});
+
+test('Text-to-Speech language detection, Markdown stripping, and voice matching work accurately', () => {
+  const ruDetected = detectSpeechLanguage('Анализ модуля завершён. Ключевые рекомендации по безопасности.');
+  assert.equal(ruDetected.langCode, 'ru-RU');
+  assert.equal(ruDetected.shortLabel, 'RU');
+
+  // Russian prose containing an embedded TypeScript code block should still detect Russian
+  const mixedCodeAndRu = detectSpeechLanguage(
+    'Рекомендация:\n```typescript\nexport function verifyToken(token: string) { return Boolean(token); }\n```'
+  );
+  assert.equal(mixedCodeAndRu.langCode, 'ru-RU');
+
+  const enDetected = detectSpeechLanguage('Here is the architectural summary for the authentication microservice.');
+  assert.equal(enDetected.langCode, 'en-US');
+  assert.equal(enDetected.shortLabel, 'EN');
+
+  const kzDetected = detectSpeechLanguage('Сәлеметсіз бе! Жоба бойынша қысқаша есеп дайын.');
+  assert.equal(kzDetected.langCode, 'kk-KZ');
+  assert.equal(kzDetected.shortLabel, 'KZ');
+
+  const stripped = stripMarkdownForSpeech('### Заголовок\n- **Пункт 1**: `код` и\n```ts\nconst x = 1;\n```\nтекст.');
+  assert.equal(stripped, 'Заголовок Пункт 1: код и текст.');
+
+  const mockVoices = [
+    { name: 'English US', lang: 'en-US', default: true },
+    { name: 'Russian', lang: 'ru-RU', default: false },
+  ];
+  const matchedRu = selectBestVoiceForLanguage(mockVoices, 'ru-RU');
+  assert.equal(matchedRu?.name, 'Russian');
+});
+
+

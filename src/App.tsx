@@ -210,6 +210,7 @@ export default function App() {
             onSelectTheme={setTheme}
             onNewChat={handleNewChat}
             onOpenMobileMenu={() => setMobileMenuOpen(true)}
+            exportSession={activeSession ?? sessions[0] ?? null}
           />
 
           <main
