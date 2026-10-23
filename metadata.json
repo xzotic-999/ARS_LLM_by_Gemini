@@ -1,0 +1,6 @@
+{
+  "name": "ARS LLM Workspace",
+  "description": "Responsive, WCAG-compliant enterprise AI workspace and chat dashboard with light and dark theme support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

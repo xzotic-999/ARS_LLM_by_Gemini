@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  code, pre, kbd, .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Smooth theme transitions respecting reduced-motion preferences */
+@media (prefers-reduced-motion: no-preference) {
+  .theme-transition,
+  .theme-transition * {
+    transition-property: background-color, border-color, color, fill, stroke, box-shadow, transform, opacity;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    transition-duration: 180ms;
+  }
+}
+
+/* High-visibility keyboard focus ring (WCAG 2.4.7 / 2.4.11) */
+.focus-ring {
+  outline: none;
+}
+.focus-ring:focus-visible {
+  outline: 2px solid #4F46E5;
+  outline-offset: 2px;
+}
+.dark .focus-ring:focus-visible {
+  outline: 2px solid #818CF8;
+  outline-offset: 2px;
+}
