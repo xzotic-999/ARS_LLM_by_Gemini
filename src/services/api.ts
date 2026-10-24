@@ -161,6 +161,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     return undefined as T;
   }
 
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('text/html')) {
+    throw new ApiError(
+      503,
+      'Сервер ARS_LLM недоступен. Запустите локальный backend через Docker Compose или войдите в эталонный демо-режим.'
+    );
+  }
+
   const data = await res.json().catch(() => null);
 
   if (!res.ok) {

@@ -4,6 +4,10 @@ import path from 'path';
 import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
+  const backendTarget =
+    process.env.BACKEND_URL ||
+    (process.env.npm_lifecycle_event === 'dev:local' ? 'http://localhost:3000' : '');
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
@@ -17,16 +21,17 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
-      proxy: {
-        '/api': {
-          target:
-            process.env.BACKEND_URL ||
-            (process.env.npm_lifecycle_event === 'dev:local'
-              ? 'http://localhost:3000'
-              : 'http://localhost:3001'),
-          changeOrigin: true,
-        },
-      },
+      ...(backendTarget
+        ? {
+            proxy: {
+              '/api': {
+                target: backendTarget,
+                changeOrigin: true,
+              },
+            },
+          }
+        : {}),
     },
   };
 });
+
