@@ -11,12 +11,19 @@ import {
   User,
   Check,
   X,
+  Shield,
+  LogOut,
+  Pencil,
+  Trash2,
+  MessageSquare,
 } from 'lucide-react';
 import { ArsLogo } from './ArsLogo';
 import {
   ChatListCategory,
+  ChatSession,
   NavSectionId,
 } from '../utils/dashboardLogic';
+import { QuotaLimits, UserProfile } from '../services/api';
 
 interface SidebarProps {
   activeNav: NavSectionId;
@@ -25,6 +32,15 @@ interface SidebarProps {
   onSelectCategory: (categoryId: string | null) => void;
   chatLists: ChatListCategory[];
   onCreateList: (name: string, colorHex: string) => { ok: boolean; error?: string };
+  sessions?: ChatSession[];
+  activeSessionId?: string | null;
+  onSelectSession?: (sessionId: string) => void;
+  onRenameSession?: (sessionId: string, newTitle: string) => Promise<void> | void;
+  onDeleteSession?: (sessionId: string) => Promise<void> | void;
+  user?: UserProfile | null;
+  quotas?: QuotaLimits | null;
+  onLogout?: () => Promise<void> | void;
+  isDemoMode?: boolean;
   searchQuery: string;
   onSearchChange: (q: string) => void;
   onOpenCommandSearch: () => void;
@@ -34,12 +50,13 @@ interface SidebarProps {
   onCloseMobile: () => void;
 }
 
-const NAV_ITEMS: { id: NavSectionId; label: string }[] = [
+const BASE_NAV_ITEMS: { id: NavSectionId; label: string; adminOnly?: boolean }[] = [
   { id: 'chats', label: 'Чаты' },
   { id: 'projects', label: 'Проекты' },
   { id: 'templates', label: 'Шаблоны' },
   { id: 'documents', label: 'Документы' },
   { id: 'history', label: 'История' },
+  { id: 'admin', label: 'Админ-панель', adminOnly: true },
 ];
 
 const LIST_COLOR_SWATCHES = ['#6366F1', '#3B82F6', '#10B981', '#F59E0B', '#EC4899'];
@@ -51,6 +68,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectCategory,
   chatLists,
   onCreateList,
+  sessions = [],
+  activeSessionId = null,
+  onSelectSession,
+  onRenameSession,
+  onDeleteSession,
+  user = null,
+  quotas = null,
+  onLogout,
+  isDemoMode = false,
   searchQuery,
   onSearchChange,
   onOpenCommandSearch,
@@ -65,6 +91,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [listError, setListError] = useState<string | null>(null);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
 
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState('');
+
+  const visibleNavItems = BASE_NAV_ITEMS.filter(
+    (item) => !item.adminOnly || user?.role === 'admin'
+  );
+
   const handleCreateListSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const res = onCreateList(newListName, newListColor);
@@ -75,6 +108,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
     setNewListName('');
     setListError(null);
     setIsAddingList(false);
+  };
+
+  const handleStartRename = (sess: ChatSession) => {
+    setEditingSessionId(sess.id);
+    setEditingTitle(sess.title);
+  };
+
+  const handleSaveRename = async (sessionId: string) => {
+    const trimmed = editingTitle.trim();
+    if (trimmed && onRenameSession) {
+      await onRenameSession(sessionId, trimmed);
+    }
+    setEditingSessionId(null);
+    setEditingTitle('');
   };
 
   const renderNavIcon = (id: NavSectionId, isActive: boolean) => {
@@ -113,8 +160,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
         return <File className={`w-[18px] h-[18px] shrink-0 stroke-[1.7] ${colorClass}`} aria-hidden="true" />;
       case 'history':
         return <Clock className={`w-[18px] h-[18px] shrink-0 stroke-[1.7] ${colorClass}`} aria-hidden="true" />;
+      case 'admin':
+        return <Shield className={`w-[18px] h-[18px] shrink-0 stroke-[1.7] ${colorClass}`} aria-hidden="true" />;
     }
   };
+
+  const displayUserName =
+    user?.name?.trim() ||
+    (user?.role === 'admin' ? 'Администратор' : 'Сотрудник');
+  const displayUserEmail = user?.email || 'employee@company.kz';
 
   const sidebarContent = (
     <aside
@@ -186,8 +240,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Primary Navigation */}
       <nav aria-label="Разделы рабочей области" className="px-3 space-y-1">
-        {NAV_ITEMS.map((item) => {
-          const isActive = activeNav === item.id && activeCategoryId === null;
+        {visibleNavItems.map((item) => {
+          const isActive = activeNav === item.id && activeCategoryId === null && !activeSessionId;
           return (
             <button
               key={item.id}
@@ -214,9 +268,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
       </nav>
 
       {/* Hairline Divider */}
-      <div className="my-4 mx-4 border-t border-[#E6E8F0] dark:border-slate-800/90" role="separator" />
+      <div className="my-3.5 mx-4 border-t border-[#E6E8F0] dark:border-slate-800/90" role="separator" />
 
-      {/* СПИСОК ЧАТОВ Section */}
+      {/* Scrollable Lists & Recent Conversations */}
       <div className="flex-1 overflow-y-auto px-3 space-y-1">
         {!collapsed && (
           <div className="px-3 pb-1.5 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
@@ -346,7 +400,124 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
           </form>
         )}
+
+        {/* Recent Conversations Section (wired to /api/v1/conversations) */}
+        {!collapsed && sessions.length > 0 && onSelectSession && (
+          <div className="pt-3 space-y-1">
+            <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
+              НЕДАВНИЕ ДИАЛОГИ
+            </div>
+            {sessions.slice(0, 8).map((sess) => {
+              const isCurrent = activeSessionId === sess.id;
+              const isEditing = editingSessionId === sess.id;
+
+              if (isEditing) {
+                return (
+                  <div
+                    key={sess.id}
+                    className="flex items-center gap-1 px-2 py-1 rounded-xl border border-indigo-400 bg-white dark:bg-slate-900"
+                  >
+                    <input
+                      type="text"
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSaveRename(sess.id);
+                        if (e.key === 'Escape') setEditingSessionId(null);
+                      }}
+                      aria-label="Новое название диалога"
+                      autoFocus
+                      className="focus-ring flex-1 min-w-0 text-[12.5px] bg-transparent text-slate-900 dark:text-slate-100 px-1"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => handleSaveRename(sess.id)}
+                      aria-label="Сохранить название диалога"
+                      className="focus-ring p-1 rounded text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-slate-800"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingSessionId(null)}
+                      aria-label="Отменить переименование"
+                      className="focus-ring p-1 rounded text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  key={sess.id}
+                  className={`group flex items-center justify-between px-2.5 h-[34px] rounded-xl text-[13px] transition-colors ${
+                    isCurrent
+                      ? 'bg-[#EBEEFF] dark:bg-indigo-500/20 font-semibold text-[#111827] dark:text-white'
+                      : 'text-[#374151] dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectSession(sess.id);
+                      onCloseMobile();
+                    }}
+                    className="focus-ring flex-1 flex items-center gap-2.5 min-w-0 text-left h-full"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0 text-slate-400 dark:text-slate-500" aria-hidden="true" />
+                    <span className="truncate">{sess.title}</span>
+                  </button>
+
+                  {(onRenameSession || onDeleteSession) && (
+                    <div className="hidden group-hover:flex focus-within:flex items-center gap-0.5 shrink-0 ml-1">
+                      {onRenameSession && (
+                        <button
+                          type="button"
+                          onClick={() => handleStartRename(sess)}
+                          aria-label={`Переименовать диалог «${sess.title}»`}
+                          className="focus-ring p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                        >
+                          <Pencil className="w-3 h-3" />
+                        </button>
+                      )}
+                      {onDeleteSession && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteSession(sess.id)}
+                          aria-label={`Удалить диалог «${sess.title}»`}
+                          className="focus-ring p-1 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
+
+      {/* Quota Usage Card (when available) */}
+      {!collapsed && quotas && (
+        <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white/80 dark:bg-[#151A2D] text-[11.5px] space-y-1.5">
+          <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
+            <span>Дневной лимит</span>
+            <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
+              {quotas.daily.used} / {quotas.daily.limit ?? '∞'}
+            </span>
+          </div>
+          <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
+            <span>Месячный лимит</span>
+            <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
+              {quotas.monthly.used} / {quotas.monthly.limit ?? '∞'}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Bottom User Profile Footer */}
       <div className="relative mt-auto pt-3 pb-4 px-4 border-t border-[#E6E8F0] dark:border-slate-800/90">
@@ -361,10 +532,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             {!collapsed && (
               <div className="min-w-0">
                 <div className="text-[13.5px] font-semibold text-[#111827] dark:text-slate-100 truncate">
-                  Сотрудник
+                  {displayUserName}
                 </div>
                 <div className="text-[12px] text-[#6B7280] dark:text-slate-400 truncate">
-                  employee@company.kz
+                  {displayUserEmail}
                 </div>
               </div>
             )}
@@ -389,8 +560,22 @@ export const Sidebar: React.FC<SidebarProps> = ({
             className="absolute bottom-16 left-4 right-4 p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-30 text-[12.5px] space-y-1"
           >
             <div className="px-2.5 py-1.5 text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-700/70">
-              Корпоративный аккаунт · WCAG 2.1 AA
+              {isDemoMode ? 'Демо-режим UI · WCAG 2.1 AA' : 'Корпоративный аккаунт · WCAG 2.1 AA'}
             </div>
+            {user?.role === 'admin' && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  onSelectNav('admin');
+                  setProfileMenuOpen(false);
+                }}
+                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
+              >
+                <Shield className="w-3.5 h-3.5 text-indigo-500" aria-hidden="true" />
+                <span>Админ-панель и квоты</span>
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"
@@ -402,6 +587,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
             >
               История активности
             </button>
+            {onLogout && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setProfileMenuOpen(false);
+                  onLogout();
+                }}
+                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2"
+              >
+                <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>{isDemoMode ? 'К экрану входа' : 'Выйти из аккаунта'}</span>
+              </button>
+            )}
             <button
               type="button"
               role="menuitem"

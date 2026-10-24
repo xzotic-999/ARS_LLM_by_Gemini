@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { ChatComposer } from './components/ChatComposer';
 import { QuickPrompts } from './components/QuickPrompts';
 import { ChatThreadView } from './components/ChatThreadView';
+import { LoginPage } from './components/LoginPage';
 import {
   WorkspaceSectionView,
   PromptLibraryModal,
@@ -17,6 +18,7 @@ import {
 } from './components/WorkspaceModalsAndViews';
 import {
   ChatListCategory,
+  ChatMessage,
   ChatSession,
   DEFAULT_MODEL_PARAMETERS,
   INITIAL_CHAT_LISTS,
@@ -31,15 +33,55 @@ import {
   ThemeMode,
   createCustomChatList,
   filterWorkspaceContent,
+  formatTimestampShort,
+  mapBackendConversationToSession,
   submitChatPrompt,
 } from './utils/dashboardLogic';
+import {
+  ApiError,
+  authApi,
+  chatApi,
+  conversationsApi,
+  messagesApi,
+  QuotaLimits,
+  UserProfile,
+} from './services/api';
+
+const DEMO_USER: UserProfile = {
+  id: 1,
+  email: 'employee@company.kz',
+  name: 'Сотрудник',
+  role: 'admin',
+};
+
+const DEMO_QUOTAS: QuotaLimits = {
+  daily: { used: 4, limit: 20 },
+  monthly: { used: 38, limit: 500 },
+};
+
+function hasDemoQueryParam(): boolean {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  return params.get('demo') === '1' || params.get('autostart') === '1';
+}
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>('light');
+  const [authChecked, setAuthChecked] = useState<boolean>(() => hasDemoQueryParam());
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => hasDemoQueryParam());
+  const [user, setUser] = useState<UserProfile | null>(() =>
+    hasDemoQueryParam() ? DEMO_USER : null
+  );
+  const [quotas, setQuotas] = useState<QuotaLimits | null>(() =>
+    hasDemoQueryParam() ? DEMO_QUOTAS : null
+  );
+
   const [activeNav, setActiveNav] = useState<NavSectionId>('chats');
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
   const [chatLists, setChatLists] = useState<ChatListCategory[]>(INITIAL_CHAT_LISTS);
-  const [sessions, setSessions] = useState<ChatSession[]>(INITIAL_SESSIONS);
+  const [sessions, setSessions] = useState<ChatSession[]>(() =>
+    hasDemoQueryParam() ? INITIAL_SESSIONS : []
+  );
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
   const [promptValue, setPromptValue] = useState('');
@@ -51,6 +93,14 @@ export default function App() {
   const [modelParamsOpen, setModelParamsOpen] = useState(false);
   const [commandSearchOpen, setCommandSearchOpen] = useState(false);
   const [modelParams, setModelParams] = useState<ModelParameters>(DEFAULT_MODEL_PARAMETERS);
+
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState<{
+    text: string;
+    attachments: string[];
+  } | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   // Sync dark mode class on root HTML element
   useEffect(() => {
@@ -73,6 +123,193 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  const refreshQuotas = useCallback(async () => {
+    if (isDemoMode) return;
+    try {
+      const res = await authApi.quotas();
+      setQuotas(res.quotas);
+    } catch {
+      // Non-fatal if quotas endpoint fails
+    }
+  }, [isDemoMode]);
+
+  const loadConversations = useCallback(async () => {
+    if (isDemoMode) return;
+    try {
+      const list = await conversationsApi.list();
+      setSessions((prev) => {
+        const prevById = new Map(prev.map((s) => [s.id, s]));
+        return list.map((conv) => {
+          const existing = prevById.get(`conv-${conv.id}`);
+          return mapBackendConversationToSession(
+            conv,
+            [],
+            existing
+          );
+        });
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setUser(null);
+      }
+    }
+  }, [isDemoMode]);
+
+  // Check backend session on mount unless in explicit demo mode
+  useEffect(() => {
+    if (isDemoMode) {
+      setAuthChecked(true);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const meRes = await authApi.me();
+        if (cancelled) return;
+        setUser(meRes.user);
+        if (meRes.user.quotas) {
+          setQuotas(meRes.user.quotas);
+        } else {
+          refreshQuotas();
+        }
+        await loadConversations();
+      } catch {
+        if (!cancelled) {
+          setUser(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthChecked(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isDemoMode, loadConversations, refreshQuotas]);
+
+  const handleLogin = async (email: string, password: string) => {
+    const res = await authApi.login(email, password);
+    setIsDemoMode(false);
+    setUser(res.user);
+    setActiveSessionId(null);
+    setActiveNav('chats');
+    await Promise.all([loadConversations(), refreshQuotas()]);
+  };
+
+  const handleEnterDemoMode = () => {
+    setIsDemoMode(true);
+    setUser(DEMO_USER);
+    setQuotas(DEMO_QUOTAS);
+    setSessions(INITIAL_SESSIONS);
+    setActiveSessionId(null);
+    setActiveNav('chats');
+    setStreamError(null);
+  };
+
+  const handleLogout = async () => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
+    }
+    if (!isDemoMode) {
+      try {
+        await authApi.logout();
+      } catch {
+        // Ignore network errors on logout
+      }
+    }
+    setIsDemoMode(false);
+    setUser(null);
+    setQuotas(null);
+    setSessions([]);
+    setActiveSessionId(null);
+    setStreamError(null);
+  };
+
+  const handleSelectSession = async (sessionId: string) => {
+    setActiveSessionId(sessionId);
+    setActiveNav('chats');
+    setStreamError(null);
+
+    if (isDemoMode) return;
+
+    const target = sessions.find((s) => s.id === sessionId);
+    const convId =
+      target?.conversationId ??
+      (sessionId.startsWith('conv-') ? parseInt(sessionId.slice(5), 10) : NaN);
+
+    if (Number.isNaN(convId)) return;
+
+    try {
+      const msgs = await messagesApi.list(convId);
+      setSessions((prev) =>
+        prev.map((s) => {
+          if (s.id !== sessionId) return s;
+          // Always sync messages (even when msgs is empty!) to avoid stale messages
+          const mapped: ChatMessage[] = msgs
+            .filter((m) => m.role === 'user' || m.role === 'assistant')
+            .map((m) => ({
+              id: `db-msg-${m.id}`,
+              role: m.role as 'user' | 'assistant',
+              content: m.text,
+              timestamp: formatTimestampShort(m.created_at),
+            }));
+          return { ...s, messages: mapped };
+        })
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setUser(null);
+        return;
+      }
+      setStreamError(
+        err instanceof Error ? err.message : 'Не удалось загрузить историю сообщений'
+      );
+    }
+  };
+
+  const handleRenameSession = async (sessionId: string, newTitle: string) => {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, title: trimmed } : s))
+    );
+
+    if (isDemoMode) return;
+
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target?.conversationId) {
+      try {
+        await conversationsApi.rename(target.conversationId, trimmed);
+      } catch {
+        // Reload list if rename failed
+        loadConversations();
+      }
+    }
+  };
+
+  const handleDeleteSession = async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    if (activeSessionId === sessionId) {
+      setActiveSessionId(null);
+    }
+
+    if (isDemoMode) return;
+
+    if (target?.conversationId) {
+      try {
+        await conversationsApi.delete(target.conversationId);
+      } catch {
+        loadConversations();
+      }
+    }
+  };
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? null,
@@ -106,30 +343,226 @@ export default function App() {
   };
 
   const handleNewChat = () => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
+      setIsStreaming(false);
+    }
     setActiveSessionId(null);
     setActiveCategoryId(null);
     setActiveNav('chats');
     setPromptValue('');
+    setStreamError(null);
   };
 
-  const handleSubmitPrompt = (text: string, attachments: string[]) => {
-    const res = submitChatPrompt({
-      existingSession: activeSession,
-      promptText: text,
-      attachments,
-      categoryId: activeCategoryId ?? 'code',
-      modelParams,
-    });
-    if (!res.ok) return;
-
-    if (activeSession) {
-      setSessions((prev) => prev.map((s) => (s.id === res.session.id ? res.session : s)));
-    } else {
-      setSessions((prev) => [res.session, ...prev]);
-      setActiveSessionId(res.session.id);
+  const handleAbortStream = () => {
+    if (streamAbortRef.current) {
+      streamAbortRef.current.abort();
+      streamAbortRef.current = null;
     }
-    setActiveNav('chats');
-    setPromptValue('');
+    setIsStreaming(false);
+  };
+
+  const handleSubmitPrompt = async (text: string, attachments: string[]) => {
+    const trimmed = text.trim();
+    if (!trimmed || isStreaming) return;
+
+    setStreamError(null);
+    setLastSubmittedPrompt({ text: trimmed, attachments });
+
+    // Demo mode uses deterministic local response logic
+    if (isDemoMode) {
+      const res = submitChatPrompt({
+        existingSession: activeSession,
+        promptText: trimmed,
+        attachments,
+        categoryId: activeCategoryId ?? 'code',
+        modelParams,
+      });
+      if (!res.ok) return;
+
+      if (activeSession) {
+        setSessions((prev) => prev.map((s) => (s.id === res.session.id ? res.session : s)));
+      } else {
+        setSessions((prev) => [res.session, ...prev]);
+        setActiveSessionId(res.session.id);
+      }
+      setQuotas((prev) =>
+        prev
+          ? {
+              daily: { ...prev.daily, used: prev.daily.used + 1 },
+              monthly: { ...prev.monthly, used: prev.monthly.used + 1 },
+            }
+          : prev
+      );
+      setActiveNav('chats');
+      setPromptValue('');
+      return;
+    }
+
+    // Production backend mode:
+    // 1. Ensure conversation exists in PostgreSQL
+    let currentSession = activeSession;
+    let convId = currentSession?.conversationId;
+
+    try {
+      if (!currentSession || !convId) {
+        const title = trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed;
+        const createdConv = await conversationsApi.create(title);
+        convId = createdConv.id;
+        currentSession = mapBackendConversationToSession(createdConv, []);
+        currentSession.categoryId = activeCategoryId ?? 'code';
+        setSessions((prev) => [currentSession!, ...prev]);
+        setActiveSessionId(currentSession.id);
+      }
+
+      const targetSessionId = currentSession.id;
+      const targetConvId = convId;
+      setActiveNav('chats');
+      setPromptValue('');
+
+      // 2. Persist user message in PostgreSQL (defer quota increment to completion endpoint)
+      const savedUserMsg = await messagesApi.send(targetConvId, trimmed, 'user', true);
+
+      const userChatMsg: ChatMessage = {
+        id: `db-msg-${savedUserMsg.id}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: formatTimestampShort(savedUserMsg.created_at),
+        attachments: attachments.length > 0 ? [...attachments] : undefined,
+      };
+
+      const streamingAssistantId = `stream-a-${Date.now()}`;
+      const assistantPlaceholder: ChatMessage = {
+        id: streamingAssistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: 'Сейчас',
+        isStreaming: true,
+      };
+
+      const historyForModel = [
+        ...currentSession.messages.map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        })),
+        { role: 'user' as const, content: trimmed },
+      ];
+
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === targetSessionId
+            ? {
+                ...s,
+                updatedAt: 'Только что',
+                messages: [...s.messages, userChatMsg, assistantPlaceholder],
+              }
+            : s
+        )
+      );
+
+      // 3. Stream completion from POST /api/v1/chat/completions
+      setIsStreaming(true);
+      const abortController = new AbortController();
+      streamAbortRef.current = abortController;
+      let accumulatedReply = '';
+
+      await chatApi.streamCompletions(
+        historyForModel,
+        (token) => {
+          accumulatedReply += token;
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSessionId
+                ? {
+                    ...s,
+                    messages: s.messages.map((m) =>
+                      m.id === streamingAssistantId
+                        ? { ...m, content: accumulatedReply }
+                        : m
+                    ),
+                  }
+                : s
+            )
+          );
+        },
+        async () => {
+          setIsStreaming(false);
+          streamAbortRef.current = null;
+          const finalContent = accumulatedReply.trim();
+
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSessionId
+                ? {
+                    ...s,
+                    messages: s.messages.map((m) =>
+                      m.id === streamingAssistantId
+                        ? {
+                            ...m,
+                            content: finalContent || 'Генерация остановлена.',
+                            isStreaming: false,
+                          }
+                        : m
+                    ),
+                  }
+                : s
+            )
+          );
+
+          if (finalContent) {
+            try {
+              await messagesApi.send(targetConvId, finalContent, 'assistant');
+            } catch {
+              // Non-fatal if assistant message persistence fails after stream
+            }
+          }
+          refreshQuotas();
+        },
+        (err) => {
+          setIsStreaming(false);
+          streamAbortRef.current = null;
+          if (err instanceof ApiError && err.status === 401) {
+            setUser(null);
+            return;
+          }
+          setStreamError(err.message);
+          // Remove empty placeholder if no tokens arrived
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSessionId
+                ? {
+                    ...s,
+                    messages: s.messages
+                      .filter(
+                        (m) => !(m.id === streamingAssistantId && !m.content.trim())
+                      )
+                      .map((m) =>
+                        m.id === streamingAssistantId ? { ...m, isStreaming: false } : m
+                      ),
+                  }
+                : s
+            )
+          );
+          refreshQuotas();
+        },
+        abortController.signal
+      );
+    } catch (err) {
+      setIsStreaming(false);
+      if (err instanceof ApiError && err.status === 401) {
+        setUser(null);
+        return;
+      }
+      setStreamError(
+        err instanceof Error ? err.message : 'Ошибка отправки сообщения'
+      );
+    }
+  };
+
+  const handleRetryLastPrompt = () => {
+    if (!lastSubmittedPrompt || isStreaming) return;
+    handleSubmitPrompt(lastSubmittedPrompt.text, lastSubmittedPrompt.attachments);
   };
 
   const handleSelectQuickPrompt = (qp: QuickPrompt) => {
@@ -154,6 +587,8 @@ export default function App() {
         return 'Документы';
       case 'history':
         return 'История';
+      case 'admin':
+        return 'Админ-панель';
       default:
         return 'Новый чат';
     }
@@ -161,6 +596,30 @@ export default function App() {
 
   const showNewChatWelcome =
     activeNav === 'chats' && activeSession === null && activeCategoryId === null && !searchQuery.trim();
+
+  if (!authChecked) {
+    return (
+      <div className="min-h-screen w-full bg-[#EEF1F7] dark:bg-[#070A12] flex items-center justify-center p-6">
+        <div
+          role="status"
+          className="px-6 py-4 rounded-2xl bg-white dark:bg-[#0E1322] border border-[#E2E5EE] dark:border-slate-800 text-[14px] font-medium text-slate-700 dark:text-slate-200 shadow-sm"
+        >
+          Проверка сессии ARS LLM...
+        </div>
+      </div>
+    );
+  }
+
+  if (!user && !isDemoMode) {
+    return (
+      <LoginPage
+        theme={theme}
+        onSelectTheme={setTheme}
+        onLogin={handleLogin}
+        onEnterDemoMode={handleEnterDemoMode}
+      />
+    );
+  }
 
   return (
     <div className="theme-transition min-h-screen w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col md:p-4 lg:p-5">
@@ -173,7 +632,7 @@ export default function App() {
       </a>
 
       {/* Outer Dashboard Frame matching the reference screenshot */}
-      <div className="flex-1 flex w-full max-w-[1440px] mx-auto md:rounded-[24px] overflow-hidden border border-[#E2E5EE] dark:border-slate-800/90 bg-white dark:bg-[#0E1322] shadow-[0_14px_44px_rgba(15,23,42,0.06)] dark:shadow-[0_14px_44px_rgba(0,0,0,0.45)] min-h-[calc(100vh-2.5rem)]">
+      <div className="flex-1 flex w-full max-w-[1440px] mx-auto md:rounded-[24px] overflow-hidden border border-[#E2E5EE] dark:border-slate-800/90 bg-white dark:bg-[#0E1322] shadow-[0_14px_44px_rgba(15,23,42,0.06)] dark:shadow-[0_14px_44px_rgba(0,0,0,0.45)] min-h-[calc(100vh-2.5rem)] md:h-[calc(100vh-2.5rem)]">
         {/* Left Sidebar */}
         <Sidebar
           activeNav={activeNav}
@@ -188,6 +647,15 @@ export default function App() {
           }}
           chatLists={chatLists}
           onCreateList={handleCreateList}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={handleSelectSession}
+          onRenameSession={handleRenameSession}
+          onDeleteSession={handleDeleteSession}
+          user={user}
+          quotas={quotas}
+          onLogout={handleLogout}
+          isDemoMode={isDemoMode}
           searchQuery={searchQuery}
           onSearchChange={(q) => {
             setSearchQuery(q);
@@ -243,6 +711,15 @@ export default function App() {
                   onOpenModelParams={() => setModelParamsOpen(true)}
                 />
 
+                {streamError && (
+                  <div
+                    role="alert"
+                    className="mt-4 w-full max-w-[680px] p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300 text-center"
+                  >
+                    {streamError}
+                  </div>
+                )}
+
                 {/* Quick Prompts 3 + 2 Grid */}
                 <QuickPrompts
                   prompts={QUICK_PROMPTS}
@@ -259,6 +736,10 @@ export default function App() {
                 onOpenModelParams={() => setModelParamsOpen(true)}
                 onToggleStar={handleToggleStar}
                 onBackToWelcome={handleNewChat}
+                isStreaming={isStreaming}
+                onAbortStream={handleAbortStream}
+                streamError={streamError}
+                onRetryLastPrompt={lastSubmittedPrompt ? handleRetryLastPrompt : undefined}
               />
             ) : (
               <WorkspaceSectionView
@@ -269,8 +750,7 @@ export default function App() {
                 templates={filteredContent.templates}
                 documents={filteredContent.documents}
                 onOpenSession={(sess) => {
-                  setActiveSessionId(sess.id);
-                  setActiveNav('chats');
+                  handleSelectSession(sess.id);
                 }}
                 onUseTemplate={(tplText) => {
                   setPromptValue(tplText);
@@ -280,6 +760,7 @@ export default function App() {
                   setSearchQuery('');
                 }}
                 onResetToNewChat={handleNewChat}
+                isDemoMode={isDemoMode}
               />
             )}
           </main>
@@ -310,8 +791,7 @@ export default function App() {
         sessions={filteredContent.sessions}
         templates={filteredContent.templates}
         onSelectSession={(sess) => {
-          setActiveSessionId(sess.id);
-          setActiveNav('chats');
+          handleSelectSession(sess.id);
         }}
         onSelectTemplate={(tplText) => {
           setPromptValue(tplText);

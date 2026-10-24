@@ -1,0 +1,76 @@
+ARS_LLM handoff package
+Generated: 2026-10-24 02:09:30
+Source: D:\projects\ARS_LLM
+Purpose: Gemini review and integration of UI with existing backend
+Safety: original source directory was not modified by this script
+Important: inspect configuration and scan for secrets before publishing
+
+Included files:
+.env.example
+.gitignore
+backend\Dockerfile
+backend\package.json
+backend\package-lock.json
+backend\src\config\env.ts
+backend\src\config\index.ts
+backend\src\db\index.ts
+backend\src\db\migrate.ts
+backend\src\index.ts
+backend\src\middleware\auth.ts
+backend\src\middleware\errorHandler.ts
+backend\src\middleware\logger.ts
+backend\src\middleware\sessionUser.ts
+backend\src\migrations\001_initial_migration.sql
+backend\src\migrations\002_conversation_user_id.sql
+backend\src\migrations\003_messages_user_id_nullable.sql
+backend\src\migrations\004_messages_cascade_delete.sql
+backend\src\migrations\005_users_and_auth.sql
+backend\src\routes\admin.ts
+backend\src\routes\auth.ts
+backend\src\routes\chat.ts
+backend\src\routes\conversations.ts
+backend\src\routes\messages.ts
+backend\src\services\bootstrap.ts
+backend\src\services\freeLlm.ts
+backend\src\services\instruction.ts
+backend\src\services\password.ts
+backend\src\services\quota.ts
+backend\src\types.ts
+backend\src\types\overrides.d.ts
+backend\tsconfig.json
+docs\GEMINI_HANDOVER.md
+frontend\index.html
+frontend\package.json
+frontend\package-lock.json
+frontend\postcss.config.cjs
+frontend\src\App.tsx
+frontend\src\components\ArsLogo.tsx
+frontend\src\components\chat\ChatArea.css
+frontend\src\components\chat\ChatArea.tsx
+frontend\src\components\ErrorBoundary.tsx
+frontend\src\components\health\index.css
+frontend\src\components\health\index.tsx
+frontend\src\components\icon\index.tsx
+frontend\src\components\input\index.css
+frontend\src\components\input\index.tsx
+frontend\src\components\LoginPage.tsx
+frontend\src\components\LoginPanel\index.tsx
+frontend\src\components\QuickPrompts.tsx
+frontend\src\components\sidebar\index.css
+frontend\src\components\sidebar\index.tsx
+frontend\src\components\topbar.tsx
+frontend\src\contexts\auth.tsx
+frontend\src\hooks\useConversations.ts
+frontend\src\lib\diagnostics.ts
+frontend\src\lib\theme.tsx
+frontend\src\main.tsx
+frontend\src\services\conversations.ts
+frontend\src\styles\globals.css
+frontend\src\styles\tokens.css
+frontend\src\vite-env.d.ts
+frontend\test\e2e\hooks-check.cjs
+frontend\test\e2e\login-e2e.cjs
+frontend\test\e2e\login-e2e-fixed.cjs
+frontend\tsconfig.json
+frontend\vite.config.ts
+infra\docker-compose.yml

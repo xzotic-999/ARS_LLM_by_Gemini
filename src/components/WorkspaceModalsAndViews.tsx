@@ -8,6 +8,9 @@ import {
   Star,
   ArrowUpRight,
   SlidersHorizontal,
+  Shield,
+  Save,
+  RefreshCw,
 } from 'lucide-react';
 import {
   ChatSession,
@@ -18,6 +21,11 @@ import {
   PromptTemplate,
   validateModelParameters,
 } from '../utils/dashboardLogic';
+import {
+  adminApi,
+  AdminUserRecord,
+  AdminUsageResponse,
+} from '../services/api';
 
 interface SecondaryViewProps {
   activeNav: NavSectionId;
@@ -29,7 +37,46 @@ interface SecondaryViewProps {
   onOpenSession: (session: ChatSession) => void;
   onUseTemplate: (promptText: string) => void;
   onResetToNewChat: () => void;
+  isDemoMode?: boolean;
 }
+
+const DEMO_ADMIN_USERS: AdminUserRecord[] = [
+  {
+    id: 1,
+    email: 'admin@ars_llm.local',
+    role: 'admin',
+    created_at: '2026-10-01T08:00:00.000Z',
+    quotas: { daily: { used: 4, limit: 100 }, monthly: { used: 38, limit: 2000 } },
+  },
+  {
+    id: 2,
+    email: 'employee@company.kz',
+    role: 'user',
+    created_at: '2026-10-05T09:30:00.000Z',
+    quotas: { daily: { used: 7, limit: 20 }, monthly: { used: 112, limit: 500 } },
+  },
+];
+
+const DEMO_ADMIN_USAGE: AdminUsageResponse = {
+  summary: [
+    { event_type: 'model_call', count: 150 },
+    { event_type: 'message_sent', count: 154 },
+  ],
+  daily: [
+    { date: '2026-10-23', event_type: 'model_call', count: 11 },
+    { date: '2026-10-22', event_type: 'model_call', count: 24 },
+  ],
+  events: [
+    {
+      id: 501,
+      user_id: 2,
+      user_email: 'employee@company.kz',
+      event_type: 'model_call',
+      metadata: { message_count: 4 },
+      created_at: '2026-10-23T12:05:00.000Z',
+    },
+  ],
+};
 
 export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   activeNav,
@@ -41,7 +88,284 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   onOpenSession,
   onUseTemplate,
   onResetToNewChat,
+  isDemoMode = false,
 }) => {
+  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>([]);
+  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(null);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [quotaDrafts, setQuotaDrafts] = useState<
+    Record<number, { daily: string; monthly: string }>
+  >({});
+  const [quotaSaveMessage, setQuotaSaveMessage] = useState<string | null>(null);
+
+  const loadAdminData = async () => {
+    setAdminLoading(true);
+    setAdminError(null);
+    if (isDemoMode) {
+      setAdminUsers(DEMO_ADMIN_USERS);
+      setAdminUsage(DEMO_ADMIN_USAGE);
+      const drafts: Record<number, { daily: string; monthly: string }> = {};
+      for (const u of DEMO_ADMIN_USERS) {
+        drafts[u.id] = {
+          daily: u.quotas.daily.limit !== null ? String(u.quotas.daily.limit) : '',
+          monthly: u.quotas.monthly.limit !== null ? String(u.quotas.monthly.limit) : '',
+        };
+      }
+      setQuotaDrafts(drafts);
+      setAdminLoading(false);
+      return;
+    }
+
+    try {
+      const [usersRes, usageRes] = await Promise.all([
+        adminApi.listUsers(),
+        adminApi.getUsage({ days: 30 }),
+      ]);
+      setAdminUsers(usersRes.users);
+      setAdminUsage(usageRes);
+      const drafts: Record<number, { daily: string; monthly: string }> = {};
+      for (const u of usersRes.users) {
+        drafts[u.id] = {
+          daily: u.quotas.daily.limit !== null ? String(u.quotas.daily.limit) : '',
+          monthly: u.quotas.monthly.limit !== null ? String(u.quotas.monthly.limit) : '',
+        };
+      }
+      setQuotaDrafts(drafts);
+    } catch (err) {
+      setAdminError(
+        err instanceof Error ? err.message : 'Не удалось загрузить данные администратора.'
+      );
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeNav === 'admin') {
+      loadAdminData();
+    }
+  }, [activeNav, isDemoMode]);
+
+  const handleSaveUserQuota = async (userId: number) => {
+    const draft = quotaDrafts[userId];
+    if (!draft) return;
+
+    const dailyLimit = draft.daily.trim() === '' ? null : parseInt(draft.daily, 10);
+    const monthlyLimit = draft.monthly.trim() === '' ? null : parseInt(draft.monthly, 10);
+
+    if (
+      (dailyLimit !== null && (Number.isNaN(dailyLimit) || dailyLimit < 0)) ||
+      (monthlyLimit !== null && (Number.isNaN(monthlyLimit) || monthlyLimit < 0))
+    ) {
+      setAdminError('Лимиты должны быть неотрицательными целыми числами');
+      return;
+    }
+
+    setAdminError(null);
+    setQuotaSaveMessage(null);
+
+    if (isDemoMode) {
+      setAdminUsers((prev) =>
+        prev.map((u) =>
+          u.id === userId
+            ? {
+                ...u,
+                quotas: {
+                  daily: { ...u.quotas.daily, limit: dailyLimit },
+                  monthly: { ...u.quotas.monthly, limit: monthlyLimit },
+                },
+              }
+            : u
+        )
+      );
+      setQuotaSaveMessage(`Квоты пользователя #${userId} обновлены`);
+      return;
+    }
+
+    try {
+      const updated = await adminApi.setUserQuotas(userId, dailyLimit, monthlyLimit);
+      setAdminUsers((prev) =>
+        prev.map((u) => (u.id === userId ? { ...u, quotas: updated.quotas } : u))
+      );
+      setQuotaSaveMessage(`Квоты пользователя #${userId} сохранены`);
+    } catch (err) {
+      setAdminError(
+        err instanceof Error ? err.message : 'Ошибка обновления квот пользователя'
+      );
+    }
+  };
+
+  if (activeNav === 'admin') {
+    return (
+      <section aria-label="Панель администратора" className="max-w-[960px] mx-auto w-full px-6 py-8 space-y-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
+              <span>Администрирование и управление квотами</span>
+            </h2>
+            <p className="text-[13.5px] text-slate-600 dark:text-slate-400 mt-1">
+              Управление дневными и месячными лимитами запросов сотрудников и статистика использования API.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={loadAdminData}
+              disabled={adminLoading}
+              className="focus-ring px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${adminLoading ? 'animate-spin' : ''}`} aria-hidden="true" />
+              <span>Обновить</span>
+            </button>
+            <button
+              type="button"
+              onClick={onResetToNewChat}
+              className="focus-ring px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              К новому чату
+            </button>
+          </div>
+        </div>
+
+        {adminError && (
+          <div
+            role="alert"
+            className="p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300"
+          >
+            {adminError}
+          </div>
+        )}
+
+        {quotaSaveMessage && (
+          <div
+            role="status"
+            className="p-3.5 rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-950/40 text-[13px] text-emerald-700 dark:text-emerald-300"
+          >
+            {quotaSaveMessage}
+          </div>
+        )}
+
+        {/* Usage Summary Cards */}
+        {adminUsage && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]">
+              <div className="text-[12px] text-slate-500 dark:text-slate-400">Пользователей в системе</div>
+              <div className="text-[22px] font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
+                {adminUsers.length}
+              </div>
+            </div>
+            {adminUsage.summary.slice(0, 2).map((item) => (
+              <div
+                key={item.event_type}
+                className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]"
+              >
+                <div className="text-[12px] text-slate-500 dark:text-slate-400">
+                  Событие: <span className="font-mono">{item.event_type}</span> (30 дн.)
+                </div>
+                <div className="text-[22px] font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
+                  {item.count}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Users & Quotas Table */}
+        <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
+                <th className="py-3 px-4">Пользователь</th>
+                <th className="py-3 px-4">Роль</th>
+                <th className="py-3 px-4">Дневной лимит (исп. / лимит)</th>
+                <th className="py-3 px-4">Месячный лимит (исп. / лимит)</th>
+                <th className="py-3 px-4 text-right">Действие</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
+              {adminUsers.map((u) => {
+                const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
+                return (
+                  <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                    <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
+                      {u.email}
+                    </td>
+                    <td className="py-3.5 px-4">
+                      <span
+                        className={`inline-flex px-2 py-0.5 rounded-md text-[11.5px] font-semibold ${
+                          u.role === 'admin'
+                            ? 'bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                        }`}
+                      >
+                        {u.role}
+                      </span>
+                    </td>
+                    <td className="py-3.5 px-4 tabular-nums">
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
+                          {u.quotas.daily.used} /
+                        </span>
+                        <input
+                          type="number"
+                          min="0"
+                          aria-label={`Дневной лимит для ${u.email}`}
+                          value={draft.daily}
+                          onChange={(e) =>
+                            setQuotaDrafts((prev) => ({
+                              ...prev,
+                              [u.id]: { ...draft, daily: e.target.value },
+                            }))
+                          }
+                          placeholder="Без лимита"
+                          className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4 tabular-nums">
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
+                          {u.quotas.monthly.used} /
+                        </span>
+                        <input
+                          type="number"
+                          min="0"
+                          aria-label={`Месячный лимит для ${u.email}`}
+                          value={draft.monthly}
+                          onChange={(e) =>
+                            setQuotaDrafts((prev) => ({
+                              ...prev,
+                              [u.id]: { ...draft, monthly: e.target.value },
+                            }))
+                          }
+                          placeholder="Без лимита"
+                          className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+                        />
+                      </div>
+                    </td>
+                    <td className="py-3.5 px-4 text-right">
+                      <button
+                        type="button"
+                        onClick={() => handleSaveUserQuota(u.id)}
+                        aria-label={`Сохранить квоты для ${u.email}`}
+                        className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12.5px] font-semibold"
+                      >
+                        <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>Сохранить</span>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
+
   if (activeNav === 'projects') {
     return (
       <section aria-label="Проекты" className="max-w-[920px] mx-auto w-full px-6 py-8">

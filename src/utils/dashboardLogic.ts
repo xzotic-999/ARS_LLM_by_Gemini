@@ -1,6 +1,6 @@
 export type ThemeMode = 'light' | 'dark';
 
-export type NavSectionId = 'chats' | 'projects' | 'templates' | 'documents' | 'history';
+export type NavSectionId = 'chats' | 'projects' | 'templates' | 'documents' | 'history' | 'admin';
 
 export interface ChatListCategory {
   id: string;
@@ -53,10 +53,12 @@ export interface ChatMessage {
   content: string;
   timestamp: string;
   attachments?: string[];
+  isStreaming?: boolean;
 }
 
 export interface ChatSession {
   id: string;
+  conversationId?: number;
   title: string;
   categoryId: string;
   updatedAt: string;
@@ -664,4 +666,46 @@ export function selectBestVoiceForLanguage<T extends { lang: string; default?: b
   return voices.find((v) => v.default) ?? voices[0];
 }
 
+/**
+ * Formats an ISO timestamp string into a concise HH:MM or localized date string.
+ */
+export function formatTimestampShort(isoString?: string | null): string {
+  if (!isoString) return 'Сейчас';
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return isoString;
+  return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
 
+/**
+ * Maps a backend ConversationRecord and optional MessageRecord[] into a UI ChatSession.
+ */
+export function mapBackendConversationToSession(
+  conv: { id: number; title: string | null; created_at: string; last_message_at: string | null },
+  messages: Array<{
+    id: number;
+    conversation_id: number;
+    role: 'user' | 'assistant' | 'system';
+    text: string;
+    created_at: string;
+  }> = [],
+  existingSession?: ChatSession | null
+): ChatSession {
+  const mappedMessages: ChatMessage[] = messages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({
+      id: `db-msg-${m.id}`,
+      role: m.role as 'user' | 'assistant',
+      content: m.text,
+      timestamp: formatTimestampShort(m.created_at),
+    }));
+
+  return {
+    id: `conv-${conv.id}`,
+    conversationId: conv.id,
+    title: conv.title?.trim() || `Диалог #${conv.id}`,
+    categoryId: existingSession?.categoryId ?? 'code',
+    updatedAt: formatTimestampShort(conv.last_message_at || conv.created_at),
+    starred: existingSession?.starred ?? false,
+    messages: mappedMessages,
+  };
+}

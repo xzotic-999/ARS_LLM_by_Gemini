@@ -191,4 +191,80 @@ test('Text-to-Speech language detection, Markdown stripping, and voice matching 
   assert.equal(matchedRu?.name, 'Russian');
 });
 
+test('Backend conversation mapping and SSE streaming parser work accurately', async () => {
+  const { mapBackendConversationToSession } = await import('./dashboardLogic');
+  const { parseSseLines, isValidCorporateEmail } = await import('../services/api');
 
+  // 1. Validate corporate emails including .local bootstrap domain
+  assert.equal(isValidCorporateEmail('admin@ars_llm.local'), true);
+  assert.equal(isValidCorporateEmail('employee@company.kz'), true);
+  assert.equal(isValidCorporateEmail('invalid-email'), false);
+
+  // 2. Map backend conversation and messages into UI ChatSession
+  const session = mapBackendConversationToSession(
+    {
+      id: 42,
+      title: 'Аудит архитектуры безопасности',
+      created_at: '2026-10-23T10:00:00.000Z',
+      last_message_at: '2026-10-23T10:05:00.000Z',
+    },
+    [
+      {
+        id: 101,
+        conversation_id: 42,
+        role: 'system',
+        text: 'Untrusted or internal system note',
+        created_at: '2026-10-23T10:00:00.000Z',
+      },
+      {
+        id: 102,
+        conversation_id: 42,
+        role: 'user',
+        text: 'Проверь настройки сессии.',
+        created_at: '2026-10-23T10:01:00.000Z',
+      },
+      {
+        id: 103,
+        conversation_id: 42,
+        role: 'assistant',
+        text: 'Сессии используют HttpOnly cookie.',
+        created_at: '2026-10-23T10:02:00.000Z',
+      },
+    ]
+  );
+
+  assert.equal(session.id, 'conv-42');
+  assert.equal(session.conversationId, 42);
+  assert.equal(session.messages.length, 2);
+  assert.equal(session.messages[0].role, 'user');
+  assert.equal(session.messages[1].role, 'assistant');
+
+  // 3. Parse SSE stream chunks (role delta, content delta, [DONE], and partial buffer)
+  const rawSse = [
+    'data: {"id":"1","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+    '',
+    'data: {"id":"1","choices":[{"index":0,"delta":{"content":"Привет"},"finish_reason":null}]}',
+    '',
+    'data: {"id":"1","choices":[{"index":0,"delta":{"content":", коллега!"},"finish_reason":null}]}',
+    '',
+    'data: [DONE]',
+    '',
+    'data: {"partial":',
+  ].join('\n');
+
+  const parsed = parseSseLines(rawSse);
+  assert.equal(parsed.events.length, 3);
+  assert.deepEqual(parsed.events[0], { type: 'delta', content: 'Привет' });
+  assert.deepEqual(parsed.events[1], { type: 'delta', content: ', коллега!' });
+  assert.deepEqual(parsed.events[2], { type: 'done' });
+  assert.equal(parsed.remainingBuffer, 'data: {"partial":');
+
+  // 4. Parse SSE error event
+  const errorSse = 'event: error\ndata: {"error":{"message":"Chat generation failed."}}\n\n';
+  const parsedErr = parseSseLines(errorSse);
+  assert.equal(parsedErr.events.length, 1);
+  assert.deepEqual(parsedErr.events[0], {
+    type: 'error',
+    message: 'Chat generation failed.',
+  });
+});

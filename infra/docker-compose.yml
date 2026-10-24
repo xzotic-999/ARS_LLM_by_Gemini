@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ars_llm_postgres
+    environment:
+      POSTGRES_DB: ars_llm_db
+      POSTGRES_USER: ars_llm_user
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ars_llm_network
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: ars_llm_backend
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ars_llm_user
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
+      POSTGRES_DB: ars_llm_db
+      FREELLM_API_BASE_URL: "http://host.docker.internal:31415/v1"
+      FREELLM_MODEL: "auto"
+      FREELLM_API_KEY: "${FREELLM_API_KEY:?FreeLLMAPI key required}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - postgres
+    networks:
+      - ars_llm_network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  ars_llm_network:
+    driver: bridge
