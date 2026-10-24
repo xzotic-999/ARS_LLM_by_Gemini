@@ -60,7 +60,7 @@ test("periodStart computes UTC daily and monthly boundaries accurately", async (
   assert.equal(monthly.toISOString(), "2026-10-01T00:00:00.000Z");
 });
 
-test("validateEnvConfig rejects ChangeMe123! and missing production secrets", async () => {
+test("validateEnvConfig enforces POSTGRES_PASSWORD, SESSION_SECRET, FREELLM_API_KEY, and rejects ChangeMe123!", async () => {
   const { validateEnvConfig } = await import("../config/env.js");
 
   // 1. Default password ChangeMe123! is forbidden in any environment
@@ -77,7 +77,23 @@ test("validateEnvConfig rejects ChangeMe123! and missing production secrets", as
     /Default password 'ChangeMe123!' is forbidden/
   );
 
-  // 2. Missing SESSION_SECRET in production throws
+  // 2. Missing or placeholder POSTGRES_PASSWORD in production throws without leaking secrets
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        POSTGRES_USER: "ars_llm_user",
+        POSTGRES_PASSWORD: "CHANGE_ME_POSTGRES_PASSWORD",
+        POSTGRES_DB: "ars_llm_db",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_KEY: "real_prod_freellm_key",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /Insecure placeholder POSTGRES_PASSWORD detected in production/
+  );
+
+  // 3. Missing or short SESSION_SECRET in production throws
   assert.throws(
     () =>
       validateEnvConfig({
@@ -92,7 +108,53 @@ test("validateEnvConfig rejects ChangeMe123! and missing production secrets", as
     /SESSION_SECRET is required in production/
   );
 
-  // 3. Valid production config succeeds
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        POSTGRES_USER: "ars_llm_user",
+        POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
+        POSTGRES_DB: "ars_llm_db",
+        SESSION_SECRET: "too_short_secret",
+        FREELLM_API_KEY: "real_prod_freellm_key",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /SESSION_SECRET in production must be at least 32 characters/
+  );
+
+  // 4. Missing or placeholder FREELLM_API_KEY in production throws
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        POSTGRES_USER: "ars_llm_user",
+        POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
+        POSTGRES_DB: "ars_llm_db",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_KEY: "",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /FREELLM_API_KEY is required in production/
+  );
+
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        POSTGRES_USER: "ars_llm_user",
+        POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
+        POSTGRES_DB: "ars_llm_db",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_KEY: "CHANGE_ME_FREELLM_API_KEY",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /FREELLM_API_KEY is required in production and must not use a placeholder value/
+  );
+
+  // 5. Valid production config succeeds
   const validProd = validateEnvConfig({
     NODE_ENV: "production",
     POSTGRES_USER: "ars_llm_user",
@@ -107,41 +169,38 @@ test("validateEnvConfig rejects ChangeMe123! and missing production secrets", as
   assert.equal(validProd.FREELLM_API_BASE_URL, "http://host.docker.internal:31415/v1");
 });
 
-test("ensureBootstrapAdmin does not overwrite existing admin or existing user password", async () => {
-  const { ensureBootstrapAdmin, validateBootstrapCredentials } = await import("./bootstrap.js");
+test("ensureBootstrapAdmin: existing active admin is not modified", async () => {
+  const { ensureBootstrapAdmin } = await import("./bootstrap.js");
 
-  // Rejects ChangeMe123!
-  assert.throws(
-    () =>
-      validateBootstrapCredentials({
-        email: "admin@ars_llm.local",
-        password: "ChangeMe123!",
-        name: "Admin",
-      }),
-    /insecure default/
-  );
-
-  // Case A: Active admin already exists -> no INSERT or UPDATE executed
-  const queriesA: string[] = [];
-  const mockDbExistingAdmin = {
-    async query(sql: string) {
-      queriesA.push(sql);
+  const executedQueries: Array<{ sql: string; params?: unknown[] }> = [];
+  const mockDb = {
+    async query(sql: string, params?: unknown[]) {
+      executedQueries.push({ sql, params });
       return { rows: [{ id: 1 }] };
     },
   };
-  const resultA = await ensureBootstrapAdmin(mockDbExistingAdmin, {
+
+  const result = await ensureBootstrapAdmin(mockDb, {
     email: "admin@ars_llm.local",
-    password: "NewPasswordShouldNotBeUsed123!",
+    password: "UnusedPassword_2026!",
     name: "Administrator",
   });
-  assert.equal(resultA, "existing_admin");
-  assert.equal(queriesA.length, 1, "Should only run the initial SELECT check");
 
-  // Case B: No active admin, but user with email exists -> promoted without changing password
-  const queriesB: string[] = [];
-  const mockDbPromoteUser = {
-    async query(sql: string) {
-      queriesB.push(sql);
+  assert.equal(result, "existing_admin");
+  assert.equal(executedQueries.length, 1, "Must execute only the initial active admin SELECT query");
+  assert.ok(
+    executedQueries[0].sql.includes("WHERE role = 'admin' AND is_active = true"),
+    "First query must check for active admin"
+  );
+});
+
+test("ensureBootstrapAdmin: existing non-admin user with matching email is NOT promoted and NOT modified", async () => {
+  const { ensureBootstrapAdmin } = await import("./bootstrap.js");
+
+  const executedQueries: Array<{ sql: string; params?: unknown[] }> = [];
+  const mockDb = {
+    async query(sql: string, params?: unknown[]) {
+      executedQueries.push({ sql, params });
       if (sql.includes("role = 'admin'")) {
         return { rows: [] };
       }
@@ -151,17 +210,126 @@ test("ensureBootstrapAdmin does not overwrite existing admin or existing user pa
       return { rows: [] };
     },
   };
-  const resultB = await ensureBootstrapAdmin(mockDbPromoteUser, {
-    email: "existing@ars_llm.local",
-    password: "ValidBootstrapPassword_2026!",
-    name: "Administrator",
-  });
-  assert.equal(resultB, "promoted_existing_user");
-  assert.equal(queriesB.length, 3);
-  assert.ok(
-    !queriesB[2].includes("password"),
-    "Promotion UPDATE query must not overwrite existing user password"
+
+  const candidatePassword = "SuperSecretAdminCandidatePassword_2026!";
+
+  await assert.rejects(
+    async () =>
+      ensureBootstrapAdmin(mockDb, {
+        email: "user@ars_llm.local",
+        password: candidatePassword,
+        name: "Administrator",
+      }),
+    (err: Error) => {
+      assert.match(err.message, /already exists without active admin privileges/);
+      assert.ok(!err.message.includes(candidatePassword), "Error message must not expose password");
+      return true;
+    }
   );
+
+  assert.equal(executedQueries.length, 2, "Must only run the 2 SELECT checks and no UPDATE/INSERT");
+  for (const q of executedQueries) {
+    assert.ok(!q.sql.includes("UPDATE"), "Must not execute any UPDATE query");
+    assert.ok(!q.sql.includes("INSERT"), "Must not execute any INSERT query");
+  }
+});
+
+test("ensureBootstrapAdmin: missing bootstrap password does not create an account", async () => {
+  const { ensureBootstrapAdmin } = await import("./bootstrap.js");
+
+  const executedQueries: string[] = [];
+  const mockDb = {
+    async query(sql: string) {
+      executedQueries.push(sql);
+      return { rows: [] };
+    },
+  };
+
+  await assert.rejects(
+    async () =>
+      ensureBootstrapAdmin(mockDb, {
+        email: "admin@ars_llm.local",
+        password: "",
+        name: "Administrator",
+      }),
+    /ADMIN_BOOTSTRAP_PASSWORD is required/
+  );
+
+  assert.equal(executedQueries.length, 1, "Must stop after active admin check before email lookup or INSERT");
+  assert.ok(!executedQueries[0].includes("INSERT"), "Must not insert any user");
+});
+
+test("ensureBootstrapAdmin: insecure password ChangeMe123! is rejected without creating an account", async () => {
+  const { ensureBootstrapAdmin } = await import("./bootstrap.js");
+
+  const executedQueries: string[] = [];
+  const mockDb = {
+    async query(sql: string) {
+      executedQueries.push(sql);
+      return { rows: [] };
+    },
+  };
+
+  await assert.rejects(
+    async () =>
+      ensureBootstrapAdmin(mockDb, {
+        email: "admin@ars_llm.local",
+        password: "ChangeMe123!",
+        name: "Administrator",
+      }),
+    (err: Error) => {
+      assert.match(err.message, /insecure default or placeholder password/);
+      assert.ok(!err.message.includes("ChangeMe123!"), "Error message must not echo the rejected password");
+      return true;
+    }
+  );
+
+  assert.equal(executedQueries.length, 1, "Must not proceed to INSERT when password is ChangeMe123!");
+});
+
+test("ensureBootstrapAdmin: creates new admin only with valid configuration and does not log password or hash", async () => {
+  const { ensureBootstrapAdmin } = await import("./bootstrap.js");
+
+  const executedQueries: Array<{ sql: string; params?: unknown[] }> = [];
+  const mockDb = {
+    async query(sql: string, params?: unknown[]) {
+      executedQueries.push({ sql, params });
+      return { rows: [] };
+    },
+  };
+
+  const rawPassword = "ValidUniqueBootstrapPassword_998877!";
+  const capturedLogs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => {
+    capturedLogs.push(args.map(String).join(" "));
+  };
+
+  try {
+    const result = await ensureBootstrapAdmin(mockDb, {
+      email: "  fresh-admin@ars_llm.local  ",
+      password: rawPassword,
+      name: "  System Admin  ",
+      nodeEnv: "production",
+    });
+
+    assert.equal(result, "created_admin");
+    assert.equal(executedQueries.length, 3);
+    assert.ok(executedQueries[2].sql.includes("INSERT INTO users"));
+
+    const insertParams = executedQueries[2].params ?? [];
+    assert.equal(insertParams[0], "System Admin");
+    assert.equal(insertParams[1], "fresh-admin@ars_llm.local");
+    const passwordHash = String(insertParams[2]);
+    assert.notEqual(passwordHash, rawPassword, "Stored password must be hashed");
+    assert.ok(passwordHash.startsWith("$2"), "Stored password must be a bcrypt hash");
+
+    const combinedLogs = capturedLogs.join("\n");
+    assert.ok(!combinedLogs.includes(rawPassword), "Logs must never contain the raw password");
+    assert.ok(!combinedLogs.includes(passwordHash), "Logs must never contain the password hash");
+  } finally {
+    console.log = originalLog;
+  }
 });
 
 test("infra/docker-compose.yml passes required env vars and keeps postgres internal", async () => {

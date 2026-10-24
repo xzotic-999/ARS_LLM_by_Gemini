@@ -52,9 +52,10 @@ export function validateBootstrapCredentials(config: BootstrapAdminConfig): {
 
 /**
  * Ensures that at least one active admin user exists in the database.
- * - If an active admin already exists, returns immediately without modifying credentials.
- * - If a user with ADMIN_BOOTSTRAP_EMAIL exists, promotes them to active admin without changing their password.
- * - Otherwise creates the initial admin using validated environment credentials and never logs any password.
+ * - If an active admin already exists, returns "existing_admin" immediately without modifying any data.
+ * - If no active admin exists and ADMIN_BOOTSTRAP_EMAIL already belongs to an existing user,
+ *   throws an explicit error without changing that user's role, active status, or password.
+ * - Otherwise creates the initial admin only when valid credentials are provided, and never logs passwords or hashes.
  */
 export async function ensureBootstrapAdmin(
   db: QueryExecutor = pool,
@@ -64,7 +65,7 @@ export async function ensureBootstrapAdmin(
     name: env.ADMIN_BOOTSTRAP_NAME,
     nodeEnv: env.NODE_ENV,
   }
-): Promise<"existing_admin" | "promoted_existing_user" | "created_admin"> {
+): Promise<"existing_admin" | "created_admin"> {
   const adminCheck = await db.query(
     "SELECT id FROM users WHERE role = 'admin' AND is_active = true LIMIT 1"
   );
@@ -76,17 +77,13 @@ export async function ensureBootstrapAdmin(
 
   const { email, password, name } = validateBootstrapCredentials(config);
 
-  // Check if user with this email already exists
+  // Check if a user with this email already exists (without active admin role)
   const existing = await db.query("SELECT id FROM users WHERE email = $1", [email]);
 
   if (existing.rows.length > 0) {
-    // Promote existing user to admin without overwriting their existing password hash
-    await db.query(
-      "UPDATE users SET role = 'admin', is_active = true WHERE email = $1",
-      [email]
+    throw new Error(
+      `[BOOTSTRAP] Cannot create bootstrap admin: user with email '${email}' already exists without active admin privileges.`
     );
-    console.log(`[BOOTSTRAP] Promoted existing user ${email} to active admin.`);
-    return "promoted_existing_user";
   }
 
   const passwordHash = await hashPassword(password);

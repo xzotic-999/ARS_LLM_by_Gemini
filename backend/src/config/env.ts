@@ -82,7 +82,7 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     }
     sessionSecret = randomBytes(32).toString("hex");
     console.warn(
-      "SESSION_SECRET not set — using a generated dev-only value. Set SESSION_SECRET in .env for production."
+      "SESSION_SECRET not set - using a generated dev-only value. Set SESSION_SECRET in .env for production."
     );
   } else if (isProd && (sessionSecret.length < 32 || INSECURE_SECRET_BLACKLIST.has(sessionSecret))) {
     throw new Error(
