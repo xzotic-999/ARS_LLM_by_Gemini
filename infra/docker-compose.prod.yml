@@ -1,0 +1,80 @@
+# ==============================================================================
+# ARS_LLM — Production Docker Compose Stack (Zero Local-Machine Dependency)
+# ==============================================================================
+# Runs entirely on remote server/VPS infrastructure without host.docker.internal.
+# Connects to either an external cloud OpenAI-compatible/FreeLLMAPI URL or a
+# cloud-hosted FreeLLMAPI gateway service inside the Docker network.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ars_llm_prod_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-ars_llm_db}"
+      POSTGRES_USER: "${POSTGRES_USER:-ars_llm_user}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ars_llm_user} -d $${POSTGRES_DB:-ars_llm_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - ars_llm_prod_network
+
+  ars_llm:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: ars_llm_prod_app
+    restart: always
+    environment:
+      NODE_ENV: "production"
+      PORT: "${PORT:-3000}"
+      TRUST_PROXY: "${TRUST_PROXY:-true}"
+      SERVE_STATIC_SPA: "true"
+      AUTO_MIGRATE: "${AUTO_MIGRATE:-true}"
+      CORS_ORIGIN: "${CORS_ORIGIN:-}"
+      DATABASE_URL: "${DATABASE_URL:-}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      POSTGRES_USER: "${POSTGRES_USER:-ars_llm_user}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
+      POSTGRES_DB: "${POSTGRES_DB:-ars_llm_db}"
+      POSTGRES_SSL: "${POSTGRES_SSL:-false}"
+      POSTGRES_SSL_REJECT_UNAUTHORIZED: "${POSTGRES_SSL_REJECT_UNAUTHORIZED:-true}"
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET required}"
+      SESSION_MAX_AGE_MS: "${SESSION_MAX_AGE_MS:-86400000}"
+      RATE_LIMIT_WINDOW_MS: "${RATE_LIMIT_WINDOW_MS:-900000}"
+      RATE_LIMIT_MAX_REQUESTS: "${RATE_LIMIT_MAX_REQUESTS:-30}"
+      DAILY_QUOTA_DEFAULT: "${DAILY_QUOTA_DEFAULT:-20}"
+      MONTHLY_QUOTA_DEFAULT: "${MONTHLY_QUOTA_DEFAULT:-500}"
+      ADMIN_BOOTSTRAP_EMAIL: "${ADMIN_BOOTSTRAP_EMAIL:?ADMIN_BOOTSTRAP_EMAIL required}"
+      ADMIN_BOOTSTRAP_PASSWORD: "${ADMIN_BOOTSTRAP_PASSWORD:?ADMIN_BOOTSTRAP_PASSWORD required}"
+      ADMIN_BOOTSTRAP_NAME: "${ADMIN_BOOTSTRAP_NAME:-Administrator}"
+      # Remote AI Gateway (must NOT be localhost, 127.0.0.1, or host.docker.internal)
+      FREELLM_API_BASE_URL: "${FREELLM_API_BASE_URL:?Remote FREELLM_API_BASE_URL required in production}"
+      FREELLM_API_KEY: "${FREELLM_API_KEY:?FREELLM_API_KEY required}"
+      FREELLM_MODEL: "${FREELLM_MODEL:-auto}"
+      FREELLM_TIMEOUT_MS: "${FREELLM_TIMEOUT_MS:-120000}"
+      FREELLM_FALLBACK_BASE_URL: "${FREELLM_FALLBACK_BASE_URL:-}"
+      FREELLM_FALLBACK_API_KEY: "${FREELLM_FALLBACK_API_KEY:-}"
+      FREELLM_FALLBACK_MODEL: "${FREELLM_FALLBACK_MODEL:-auto}"
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ars_llm_prod_network
+
+volumes:
+  postgres_prod_data:
+    driver: local
+
+networks:
+  ars_llm_prod_network:
+    driver: bridge

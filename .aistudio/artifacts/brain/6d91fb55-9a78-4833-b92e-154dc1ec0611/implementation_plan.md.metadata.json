@@ -1,6 +1,6 @@
 {
-  "summary":  "Implementation plan for the ARS_LLM Bootstrap Admin Security Patch: removes automatic privilege escalation of existing non-admin users, enforces strict bootstrap credential validation, verifies production secret handling, normalizes ASCII warning text, and adds comprehensive unit test coverage.",
-  "updatedAt":  "2026-10-24T15:57:41.781489619Z",
+  "summary":  "Audit findings and minimal implementation plan for connecting the cloud ARS_LLM backend to the FreeLLMAPI VS Code Dev Tunnel endpoint (https://v7skvft7-31415.euw.devtunnels.ms/v1) with server-side secret isolation, OpenAI-compatible SSE streaming verification, and non-intrusive connectivity and generation checks.",
+  "updatedAt":  "2026-10-24T22:43:59.808859277Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

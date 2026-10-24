@@ -8,9 +8,13 @@ import helmet from 'helmet';
 import session from 'express-session';
 import rateLimit from 'express-rate-limit';
 import connectPgSimple from 'connect-pg-simple';
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import env from './config/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { pool } from './db/index.js';
+import { runMigrations } from './db/migrate.js';
 import { logger } from './middleware/logger.js';
 import { loadUser } from './middleware/auth.js';
 import { ensureBootstrapAdmin } from './services/bootstrap.js';
@@ -36,11 +40,26 @@ const PgSessionStore = connectPgSimple(session);
 
 const app = express();
 
-app.use(helmet());
-app.use(cors({
-  origin: true,
-  credentials: true,
-}));
+if (env.TRUST_PROXY) {
+  app.set('trust proxy', 1);
+}
+
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+  })
+);
+
+const allowedOrigins = env.CORS_ORIGIN
+  ? env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
+  : true;
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: '1mb' }));
 app.use(logger);
 
@@ -58,8 +77,8 @@ app.use(
     cookie: {
       httpOnly: true,
       maxAge: env.SESSION_MAX_AGE_MS,
-      // In production this should be secure: true behind HTTPS.
-      secure: process.env.NODE_ENV === 'production',
+      // In production this is secure: true behind HTTPS (works with trust proxy = 1).
+      secure: env.NODE_ENV === 'production',
       sameSite: 'lax',
     },
   })
@@ -117,6 +136,33 @@ app.get('/api/v1/placeholder', (_req, res) => {
   res.json({ message: 'This is a placeholder endpoint.' });
 });
 
+// Unified Container SPA Static Serving:
+// When SERVE_STATIC_SPA is enabled and the compiled React frontend bundle is present,
+// serve static files and route non-API GET requests to index.html.
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const spaCandidateDirs = [
+  env.FRONTEND_DIST_PATH ? resolve(env.FRONTEND_DIST_PATH) : '',
+  resolve(currentDir, '../frontend-dist'),
+  resolve(currentDir, '../../dist'),
+  resolve(currentDir, '../../../dist'),
+].filter(Boolean);
+
+const resolvedSpaDir = spaCandidateDirs.find((dir) =>
+  existsSync(resolve(dir, 'index.html'))
+);
+
+if (env.SERVE_STATIC_SPA && resolvedSpaDir) {
+  console.log(`Serving compiled frontend SPA from: ${resolvedSpaDir}`);
+  app.use(express.static(resolvedSpaDir));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/') || req.path === '/health') {
+      next();
+      return;
+    }
+    res.sendFile(resolve(resolvedSpaDir, 'index.html'));
+  });
+}
+
 app.use(errorHandler);
 
 const port = env.PORT || 3000;
@@ -125,10 +171,14 @@ const server = app.listen(port, async () => {
   console.log(`Backend listening on port ${port}`);
 
   try {
+    if (env.AUTO_MIGRATE) {
+      console.log('Running automatic database migrations...');
+      await runMigrations();
+    }
     await ensureBootstrapAdmin();
   } catch (err) {
     console.error(
-      'Bootstrap admin initialization failed:',
+      'Startup initialization failed:',
       err instanceof Error ? err.message : err
     );
     if (env.NODE_ENV === 'production') {

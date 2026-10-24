@@ -132,6 +132,7 @@ test("validateEnvConfig enforces POSTGRES_PASSWORD, SESSION_SECRET, FREELLM_API_
         POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
         POSTGRES_DB: "ars_llm_db",
         SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
         FREELLM_API_KEY: "",
         ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
         ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
@@ -147,6 +148,7 @@ test("validateEnvConfig enforces POSTGRES_PASSWORD, SESSION_SECRET, FREELLM_API_
         POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
         POSTGRES_DB: "ars_llm_db",
         SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
         FREELLM_API_KEY: "CHANGE_ME_FREELLM_API_KEY",
         ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
         ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
@@ -154,19 +156,64 @@ test("validateEnvConfig enforces POSTGRES_PASSWORD, SESSION_SECRET, FREELLM_API_
     /FREELLM_API_KEY is required in production and must not use a placeholder value/
   );
 
-  // 5. Valid production config succeeds
+  // 5. Developer-local FREELLM_API_BASE_URL or POSTGRES_HOST is rejected in production
+  for (const localUrl of [
+    "http://host.docker.internal:31415/v1",
+    "http://localhost:31415/v1",
+    "http://127.0.0.1:31415/v1",
+  ]) {
+    assert.throws(
+      () =>
+        validateEnvConfig({
+          NODE_ENV: "production",
+          POSTGRES_HOST: "postgres",
+          POSTGRES_USER: "ars_llm_user",
+          POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
+          POSTGRES_DB: "ars_llm_db",
+          SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+          FREELLM_API_BASE_URL: localUrl,
+          FREELLM_API_KEY: "real_prod_freellm_key",
+          ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+          ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+        }),
+      /FREELLM_API_BASE_URL in production cannot use localhost, 127\.0\.0\.1, or host\.docker\.internal/
+    );
+  }
+
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        POSTGRES_HOST: "localhost",
+        POSTGRES_USER: "ars_llm_user",
+        POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
+        POSTGRES_DB: "ars_llm_db",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+        FREELLM_API_KEY: "real_prod_freellm_key",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /POSTGRES_HOST in production cannot point to localhost/
+  );
+
+  // 6. Valid production config with cloud DATABASE_URL and remote FreeLLMAPI gateway succeeds
   const validProd = validateEnvConfig({
     NODE_ENV: "production",
-    POSTGRES_USER: "ars_llm_user",
-    POSTGRES_PASSWORD: "StrongProdDbPassword_2026!",
-    POSTGRES_DB: "ars_llm_db",
+    DATABASE_URL:
+      "postgresql://ars_llm_user:StrongProdDbPassword_2026!@ep-cloud-db.neon.tech:5432/ars_llm_db",
+    POSTGRES_SSL: "true",
     SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+    FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
     FREELLM_API_KEY: "real_prod_freellm_key",
-    ADMIN_BOOTSTRAP_EMAIL: "admin@ars_llm.local",
+    ADMIN_BOOTSTRAP_EMAIL: "admin@company.kz",
     ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
   });
-  assert.equal(validProd.POSTGRES_HOST, "postgres");
-  assert.equal(validProd.FREELLM_API_BASE_URL, "http://host.docker.internal:31415/v1");
+  assert.equal(validProd.POSTGRES_HOST, "ep-cloud-db.neon.tech");
+  assert.equal(validProd.POSTGRES_SSL, true);
+  assert.equal(validProd.TRUST_PROXY, true);
+  assert.equal(validProd.SERVE_STATIC_SPA, true);
+  assert.equal(validProd.FREELLM_API_BASE_URL, "https://freellm-gateway.company.kz/v1");
 });
 
 test("ensureBootstrapAdmin: existing active admin is not modified", async () => {
@@ -361,4 +408,204 @@ test("infra/docker-compose.yml passes required env vars and keeps postgres inter
     "PostgreSQL port must not be published on all host interfaces"
   );
 });
+
+test("chatWithFreeLlm and streamChatWithFreeLlm work with remote gateway and fail over to fallback on 503/429", async () => {
+  const { chatWithFreeLlm, streamChatWithFreeLlm } = await import("./freeLlm.js");
+
+  const calledUrls: string[] = [];
+  const mockFetchUnary: typeof fetch = async (input) => {
+    const url = String(input);
+    calledUrls.push(url);
+    if (url.startsWith("https://primary-freellm.company.kz")) {
+      return new Response(JSON.stringify({ error: { message: "Rate limited" } }), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "Ответ от резервного облачного шлюза" } }],
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  };
+
+  const reply = await chatWithFreeLlm(
+    [{ role: "user", content: "Проверка отказоустойчивости" }],
+    {
+      FREELLM_API_BASE_URL: "https://primary-freellm.company.kz/v1",
+      FREELLM_API_KEY: "primary_key_123",
+      FREELLM_MODEL: "auto",
+      FREELLM_FALLBACK_BASE_URL: "https://fallback-freellm.company.kz/v1",
+      FREELLM_FALLBACK_API_KEY: "fallback_key_456",
+      FREELLM_FALLBACK_MODEL: "auto",
+    },
+    mockFetchUnary
+  );
+
+  assert.equal(reply, "Ответ от резервного облачного шлюза");
+  assert.deepEqual(calledUrls, [
+    "https://primary-freellm.company.kz/v1/chat/completions",
+    "https://fallback-freellm.company.kz/v1/chat/completions",
+  ]);
+
+  // Verify SSE streaming failover
+  const streamUrls: string[] = [];
+  const mockFetchStream: typeof fetch = async (input) => {
+    const url = String(input);
+    streamUrls.push(url);
+    if (url.startsWith("https://primary-freellm.company.kz")) {
+      return new Response("Service Unavailable", { status: 503 });
+    }
+    const ssePayload =
+      'data: {"choices":[{"delta":{"content":"Облачный "}}]}\n\n' +
+      'data: {"choices":[{"delta":{"content":"поток SSE"}}]}\n\n' +
+      "data: [DONE]\n\n";
+    return new Response(ssePayload, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  const chunks: string[] = [];
+  for await (const token of streamChatWithFreeLlm(
+    [{ role: "user", content: "Потоковый тест" }],
+    undefined,
+    {
+      FREELLM_API_BASE_URL: "https://primary-freellm.company.kz/v1",
+      FREELLM_API_KEY: "primary_key_123",
+      FREELLM_MODEL: "auto",
+      FREELLM_FALLBACK_BASE_URL: "https://fallback-freellm.company.kz/v1",
+      FREELLM_FALLBACK_API_KEY: "fallback_key_456",
+      FREELLM_FALLBACK_MODEL: "auto",
+    },
+    mockFetchStream
+  )) {
+    chunks.push(token);
+  }
+
+  assert.equal(chunks.join(""), "Облачный поток SSE");
+  assert.equal(streamUrls.length, 2);
+});
+
+test("Production Dockerfile and infra/docker-compose.prod.yml have zero dependency on host.docker.internal", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+
+  const rootDockerfile = readFileSync(resolve(process.cwd(), "Dockerfile"), "utf-8");
+  const prodCompose = readFileSync(resolve(process.cwd(), "infra/docker-compose.prod.yml"), "utf-8");
+
+  assert.ok(rootDockerfile.includes("SERVE_STATIC_SPA=true"), "Dockerfile must enable SERVE_STATIC_SPA");
+  assert.ok(rootDockerfile.includes("TRUST_PROXY=true"), "Dockerfile must enable TRUST_PROXY");
+  assert.ok(
+    rootDockerfile.includes("COPY --from=frontend-builder /frontend/dist ./frontend-dist"),
+    "Dockerfile must bundle compiled React SPA into unified runtime image"
+  );
+
+  // Strip comments from prodCompose and verify host.docker.internal is not used
+  const activeProdLines = prodCompose
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("#"))
+    .join("\n");
+
+  assert.ok(
+    !activeProdLines.includes("host.docker.internal"),
+    "infra/docker-compose.prod.yml must not depend on host.docker.internal"
+  );
+  assert.ok(
+    activeProdLines.includes('SERVE_STATIC_SPA: "true"'),
+    "infra/docker-compose.prod.yml must enable unified static SPA serving"
+  );
+});
+
+test("verifyFreeLlmConnection sends Bearer auth + Dev Tunnel header and never leaks FREELLM_API_KEY in report", async () => {
+  const { verifyFreeLlmConnection } = await import("./freeLlm.js");
+
+  const secretKey = "sk-live-secret-freellm-test-token-do-not-leak";
+  const recordedRequests: Array<{ url: string; headers: Record<string, string> }> = [];
+
+  const mockFetchSuccess: typeof fetch = async (input, init) => {
+    const url = String(input);
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    recordedRequests.push({ url, headers });
+
+    if (url.endsWith("/models")) {
+      return new Response(
+        JSON.stringify({
+          data: [{ id: "gpt-4o-mini" }, { id: "claude-3-5-sonnet" }, { id: "llama-3.3-70b" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "OK" } }],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+  };
+
+  const report = await verifyFreeLlmConnection(
+    {
+      FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+      FREELLM_MODEL: "auto",
+      FREELLM_API_KEY: secretKey,
+    },
+    mockFetchSuccess
+  );
+
+  assert.equal(report.baseUrl, "https://v7skvft7-31415.euw.devtunnels.ms/v1");
+  assert.equal(report.model, "auto");
+  assert.equal(report.apiKeyConfigured, true);
+  assert.equal(report.modelsCheck.ok, true);
+  assert.equal(report.modelsCheck.modelCount, 3);
+  assert.equal(report.completionCheck.ok, true);
+  assert.equal(report.completionCheck.replyPreviewLength, 2);
+
+  assert.equal(recordedRequests.length, 2);
+  assert.equal(
+    recordedRequests[0].url,
+    "https://v7skvft7-31415.euw.devtunnels.ms/v1/models"
+  );
+  assert.equal(recordedRequests[0].headers.Authorization, `Bearer ${secretKey}`);
+  assert.equal(
+    recordedRequests[0].headers["X-Tunnel-Skip-AntiPhishing-Page"],
+    "true"
+  );
+  assert.equal(
+    recordedRequests[1].url,
+    "https://v7skvft7-31415.euw.devtunnels.ms/v1/chat/completions"
+  );
+
+  const serializedReport = JSON.stringify(report);
+  assert.ok(
+    !serializedReport.includes(secretKey),
+    "Serialized verification report must never contain FREELLM_API_KEY"
+  );
+
+  // Also verify Dev Tunnel redirect / private port detection
+  const mockFetchTunnelRedirect: typeof fetch = async () =>
+    new Response(null, {
+      status: 302,
+      headers: {
+        location: "https://global.rel.tunnels.api.visualstudio.com/auth/github",
+      },
+    });
+
+  const redirectReport = await verifyFreeLlmConnection(
+    {
+      FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+      FREELLM_MODEL: "auto",
+      FREELLM_API_KEY: secretKey,
+    },
+    mockFetchTunnelRedirect
+  );
+
+  assert.equal(redirectReport.modelsCheck.ok, false);
+  assert.equal(redirectReport.modelsCheck.tunnelAuthRequired, true);
+  assert.match(redirectReport.modelsCheck.error ?? "", /VS Code Dev Tunnel redirected/);
+});
+
+
 

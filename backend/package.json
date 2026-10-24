@@ -8,15 +8,15 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "migrate": "node dist/db/migrate.js"
+    "migrate": "node dist/db/migrate.js",
+    "verify:freellm": "tsx src/scripts/verifyFreeLlm.ts"
   },
   "dependencies": {
     "@types/express-session": "^1.19.0",
     "argon2": "^0.40.3",
-    "bcrypt": "^5.1.1",
+    "bcrypt": "^6.0.0",
     "connect-pg-simple": "^9.0.1",
     "cors": "^2.8.5",
-    "csurf": "^1.11.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.5.1",
@@ -24,7 +24,7 @@
     "helmet": "^7.2.0",
     "node-pg-migrate": "^9.0.0",
     "pg": "^8.11.3",
-    "uuid": "^9.0.0"
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

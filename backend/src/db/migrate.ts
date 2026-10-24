@@ -16,21 +16,28 @@ const candidateDirs = [
 ];
 const migrationsDir = candidateDirs.find((d) => existsSync(d)) ?? candidateDirs[0];
 
-(async () => {
-  try {
-    const result = await runner({
-      migrationsTable: "migrations",
-      dir: migrationsDir,
-      databaseUrl: env.DB_URL,
-      direction: "up",
-      log: console.log,
-    });
-    console.log(
-      "Migrations applied:",
-      result.map((r) => r.name)
-    );
-  } catch (err) {
+export async function runMigrations(): Promise<string[]> {
+  const result = await runner({
+    migrationsTable: "migrations",
+    dir: migrationsDir,
+    databaseUrl: env.DB_URL,
+    direction: "up",
+    log: console.log,
+  });
+  const applied = result.map((r) => r.name);
+  console.log("Migrations applied:", applied);
+  return applied;
+}
+
+const isDirectRun =
+  process.argv[1] &&
+  resolve(process.argv[1]).replace(/\\/g, "/") ===
+    fileURLToPath(import.meta.url).replace(/\\/g, "/");
+
+if (isDirectRun) {
+  runMigrations().catch((err) => {
     console.error("Migration error", err);
     process.exit(1);
-  }
-})();
+  });
+}
+
