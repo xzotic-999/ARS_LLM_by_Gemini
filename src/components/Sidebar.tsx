@@ -81,7 +81,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSearchChange,
   onOpenCommandSearch,
   collapsed,
-  onToggleCollapse,
   mobileOpen,
   onCloseMobile,
 }) => {
@@ -173,36 +172,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const sidebarContent = (
     <aside
       aria-label="Основная навигация"
-      className={`flex flex-col h-full bg-[#FAFAFC] dark:bg-[#111524] border-r border-[#E6E8F0] dark:border-slate-800/90 select-none transition-all duration-200 ${
+      className={`flex flex-col h-full min-h-0 overflow-hidden bg-[#FAFAFC] dark:bg-[#111524] border-r border-[#E6E8F0] dark:border-slate-800/90 select-none transition-all duration-200 ${
         collapsed ? 'w-[76px]' : 'w-[268px]'
       }`}
     >
-      {/* Top Brand Header */}
-      <div className="flex items-center justify-between px-4 pt-5 pb-4">
+      {/* Top Brand Header (Report 5: clean logo without confusing [K] icon button) */}
+      <div className="shrink-0 flex items-center px-4 pt-4 pb-3">
         <ArsLogo collapsed={collapsed} />
-        <button
-          type="button"
-          onClick={onToggleCollapse}
-          aria-label={collapsed ? 'Развернуть боковую панель' : 'Свернуть боковую панель'}
-          title={collapsed ? 'Развернуть панель' : 'Свернуть панель'}
-          className="focus-ring flex items-center justify-center w-7 h-7 rounded-lg border border-[#E2E5EE] dark:border-slate-700/80 bg-white dark:bg-slate-800/70 text-[#4B5563] dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors shrink-0"
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 16 16"
-            fill="none"
-            aria-hidden="true"
-            className={`transition-transform duration-200 ${collapsed ? 'rotate-180' : ''}`}
-          >
-            <path d="M5 3.5V12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            <path d="M11 4.5L7.5 8L11 11.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
       </div>
 
-      {/* Search Input with Ctrl + K */}
-      <div className="px-4 pb-3">
+      {/* Unified Monolithic Search Input with Ctrl + K */}
+      <div className="shrink-0 px-4 pb-2.5">
         {collapsed ? (
           <button
             type="button"
@@ -238,42 +218,43 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Primary Navigation */}
-      <nav aria-label="Разделы рабочей области" className="px-3 space-y-1">
-        {visibleNavItems.map((item) => {
-          const isActive = activeNav === item.id && activeCategoryId === null && !activeSessionId;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                onSelectCategory(null);
-                onSelectNav(item.id);
-                onCloseMobile();
-              }}
-              aria-current={isActive ? 'page' : undefined}
-              className={`focus-ring w-full flex items-center ${
-                collapsed ? 'justify-center px-0' : 'px-3 gap-3'
-              } h-[40px] rounded-xl text-[14px] transition-colors whitespace-nowrap ${
-                isActive
-                  ? 'bg-[#EBEEFF] dark:bg-indigo-500/20 font-semibold text-[#111827] dark:text-white'
-                  : 'font-medium text-[#1F2937] dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60'
-              }`}
-            >
-              {renderNavIcon(item.id, isActive)}
-              {!collapsed && <span>{item.label}</span>}
-            </button>
-          );
-        })}
-      </nav>
+      {/* Independent Scroll Container for Navigation, Lists & Recent Dialogs (Report 3) */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-3 pb-3 space-y-1">
+        {/* Primary Navigation */}
+        <nav aria-label="Разделы рабочей области" className="space-y-0.5">
+          {visibleNavItems.map((item) => {
+            const isActive = activeNav === item.id && activeCategoryId === null && !activeSessionId;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  onSelectCategory(null);
+                  onSelectNav(item.id);
+                  onCloseMobile();
+                }}
+                aria-current={isActive ? 'page' : undefined}
+                className={`focus-ring w-full flex items-center ${
+                  collapsed ? 'justify-center px-0' : 'px-3 gap-3'
+                } h-[38px] rounded-xl text-[13.5px] transition-colors whitespace-nowrap ${
+                  isActive
+                    ? 'bg-[#EBEEFF] dark:bg-indigo-500/20 font-semibold text-[#111827] dark:text-white'
+                    : 'font-medium text-[#1F2937] dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60'
+                }`}
+              >
+                {renderNavIcon(item.id, isActive)}
+                {!collapsed && <span>{item.label}</span>}
+              </button>
+            );
+          })}
+        </nav>
 
-      {/* Hairline Divider */}
-      <div className="my-3.5 mx-4 border-t border-[#E6E8F0] dark:border-slate-800/90" role="separator" />
+        {/* Hairline Divider */}
+        <div className="my-2.5 mx-1 border-t border-[#E6E8F0] dark:border-slate-800/90" role="separator" />
 
-      {/* Scrollable Lists & Recent Conversations */}
-      <div className="flex-1 overflow-y-auto px-3 space-y-1">
+        {/* Chat Lists */}
         {!collapsed && (
-          <div className="px-3 pb-1.5 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
+          <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
             СПИСОК ЧАТОВ
           </div>
         )}
@@ -292,7 +273,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               aria-pressed={isSelected}
               className={`focus-ring w-full flex items-center ${
                 collapsed ? 'justify-center px-0' : 'justify-between px-3'
-              } h-[36px] rounded-xl text-[13.5px] transition-colors whitespace-nowrap ${
+              } h-[34px] rounded-xl text-[13px] transition-colors whitespace-nowrap ${
                 isSelected
                   ? 'bg-[#EBEEFF] dark:bg-indigo-500/20 font-semibold text-[#111827] dark:text-white'
                   : 'font-medium text-[#1F2937] dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60'
@@ -301,12 +282,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <span className="flex items-center gap-3 min-w-0">
                 {list.isStar ? (
                   <Star
-                    className="w-[16px] h-[16px] shrink-0 text-[#F59E0B] fill-[#F59E0B]"
+                    className="w-[15px] h-[15px] shrink-0 text-[#F59E0B] fill-[#F59E0B]"
                     aria-hidden="true"
                   />
                 ) : (
                   <span
-                    className="w-[14px] h-[14px] rounded-[4px] shrink-0"
+                    className="w-[13px] h-[13px] rounded-[4px] shrink-0"
                     style={{ backgroundColor: list.colorHex }}
                     aria-hidden="true"
                   />
@@ -330,9 +311,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               setIsAddingList(true);
               setListError(null);
             }}
-            className="focus-ring w-full flex items-center gap-3 px-3 h-[36px] rounded-xl text-[13.5px] font-medium text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors whitespace-nowrap"
+            className="focus-ring w-full flex items-center gap-3 px-3 h-[34px] rounded-xl text-[13px] font-medium text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/50 dark:hover:bg-slate-800/50 transition-colors whitespace-nowrap"
           >
-            <PlusCircle className="w-[17px] h-[17px] shrink-0 stroke-[1.7]" aria-hidden="true" />
+            <PlusCircle className="w-[16px] h-[16px] shrink-0 stroke-[1.7]" aria-hidden="true" />
             <span>Новый список</span>
           </button>
         )}
@@ -401,9 +382,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </form>
         )}
 
-        {/* Recent Conversations Section (wired to /api/v1/conversations) */}
+        {/* Recent Conversations Section */}
         {!collapsed && sessions.length > 0 && onSelectSession && (
-          <div className="pt-3 space-y-1">
+          <div className="pt-2.5 space-y-0.5">
             <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
               НЕДАВНИЕ ДИАЛОГИ
             </div>
@@ -452,7 +433,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               return (
                 <div
                   key={sess.id}
-                  className={`group flex items-center justify-between px-2.5 h-[34px] rounded-xl text-[13px] transition-colors ${
+                  className={`group flex items-center justify-between px-2.5 h-[32px] rounded-xl text-[13px] transition-colors ${
                     isCurrent
                       ? 'bg-[#EBEEFF] dark:bg-indigo-500/20 font-semibold text-[#111827] dark:text-white'
                       : 'text-[#374151] dark:text-slate-300 hover:bg-slate-200/60 dark:hover:bg-slate-800/60'
@@ -501,116 +482,119 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Quota Usage Card (when available) */}
-      {!collapsed && quotas && (
-        <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white/80 dark:bg-[#151A2D] text-[11.5px] space-y-1.5">
-          <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
-            <span>Дневной лимит</span>
-            <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
-              {quotas.daily.used} / {quotas.daily.limit ?? '∞'}
-            </span>
-          </div>
-          <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
-            <span>Месячный лимит</span>
-            <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
-              {quotas.monthly.used} / {quotas.monthly.limit ?? '∞'}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Bottom User Profile Footer */}
-      <div className="relative mt-auto pt-3 pb-4 px-4 border-t border-[#E6E8F0] dark:border-slate-800/90">
-        <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-between'} gap-2.5`}>
-          <div className="flex items-center gap-3 min-w-0">
-            <div
-              className="w-10 h-10 rounded-full bg-[#E8EBFF] dark:bg-indigo-500/20 flex items-center justify-center text-[#4F46E5] dark:text-indigo-400 shrink-0"
-              aria-hidden="true"
-            >
-              <User className="w-5 h-5 stroke-[1.8]" />
+      {/* Pinned Bottom Section: Quotas + User Profile Footer (Report 3: flex-shrink-0 mt-auto) */}
+      <div className="mt-auto shrink-0 pt-2 bg-[#FAFAFC] dark:bg-[#111524]">
+        {/* Quota Usage Card */}
+        {!collapsed && quotas && (
+          <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white/90 dark:bg-[#151A2D] text-[11.5px] space-y-1">
+            <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
+              <span>Дневной лимит</span>
+              <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
+                {quotas.daily.used} / {quotas.daily.limit ?? '∞'}
+              </span>
             </div>
-            {!collapsed && (
-              <div className="min-w-0">
-                <div className="text-[13.5px] font-semibold text-[#111827] dark:text-slate-100 truncate">
-                  {displayUserName}
-                </div>
-                <div className="text-[12px] text-[#6B7280] dark:text-slate-400 truncate">
-                  {displayUserEmail}
-                </div>
-              </div>
-            )}
-          </div>
-          {!collapsed && (
-            <button
-              type="button"
-              onClick={() => setProfileMenuOpen((prev) => !prev)}
-              aria-label="Меню профиля сотрудника"
-              aria-expanded={profileMenuOpen}
-              className="focus-ring p-1.5 rounded-lg text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors shrink-0"
-            >
-              <MoreVertical className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
-        </div>
-
-        {profileMenuOpen && !collapsed && (
-          <div
-            role="menu"
-            aria-label="Действия профиля"
-            className="absolute bottom-16 left-4 right-4 p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-30 text-[12.5px] space-y-1"
-          >
-            <div className="px-2.5 py-1.5 text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-700/70">
-              {isDemoMode ? 'Демо-режим UI · WCAG 2.1 AA' : 'Корпоративный аккаунт · WCAG 2.1 AA'}
+            <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
+              <span>Месячный лимит</span>
+              <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
+                {quotas.monthly.used} / {quotas.monthly.limit ?? '∞'}
+              </span>
             </div>
-            {user?.role === 'admin' && (
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  onSelectNav('admin');
-                  setProfileMenuOpen(false);
-                }}
-                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
-              >
-                <Shield className="w-3.5 h-3.5 text-indigo-500" aria-hidden="true" />
-                <span>Админ-панель и квоты</span>
-              </button>
-            )}
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                onSelectNav('history');
-                setProfileMenuOpen(false);
-              }}
-              className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60"
-            >
-              История активности
-            </button>
-            {onLogout && (
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setProfileMenuOpen(false);
-                  onLogout();
-                }}
-                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2"
-              >
-                <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>{isDemoMode ? 'К экрану входа' : 'Выйти из аккаунта'}</span>
-              </button>
-            )}
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => setProfileMenuOpen(false)}
-              className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60"
-            >
-              Закрыть меню
-            </button>
           </div>
         )}
+
+        {/* User Profile Footer */}
+        <div className="relative pt-2.5 pb-3.5 px-4 border-t border-[#E6E8F0] dark:border-slate-800/90">
+          <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-between'} gap-2.5`}>
+            <div className="flex items-center gap-3 min-w-0">
+              <div
+                className="w-9 h-9 rounded-full bg-[#E8EBFF] dark:bg-indigo-500/20 flex items-center justify-center text-[#4F46E5] dark:text-indigo-400 shrink-0"
+                aria-hidden="true"
+              >
+                <User className="w-4 h-4 stroke-[1.8]" />
+              </div>
+              {!collapsed && (
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold text-[#111827] dark:text-slate-100 truncate">
+                    {displayUserName}
+                  </div>
+                  <div className="text-[11.5px] text-[#6B7280] dark:text-slate-400 truncate">
+                    {displayUserEmail}
+                  </div>
+                </div>
+              )}
+            </div>
+            {!collapsed && (
+              <button
+                type="button"
+                onClick={() => setProfileMenuOpen((prev) => !prev)}
+                aria-label="Меню профиля сотрудника"
+                aria-expanded={profileMenuOpen}
+                className="focus-ring p-1.5 rounded-lg text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors shrink-0"
+              >
+                <MoreVertical className="w-4 h-4" aria-hidden="true" />
+              </button>
+            )}
+          </div>
+
+          {profileMenuOpen && !collapsed && (
+            <div
+              role="menu"
+              aria-label="Действия профиля"
+              className="absolute bottom-14 left-4 right-4 p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-30 text-[12.5px] space-y-1"
+            >
+              <div className="px-2.5 py-1.5 text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-700/70">
+                {isDemoMode ? 'Демо-режим UI · WCAG 2.1 AA' : 'Корпоративный аккаунт · WCAG 2.1 AA'}
+              </div>
+              {user?.role === 'admin' && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    onSelectNav('admin');
+                    setProfileMenuOpen(false);
+                  }}
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
+                >
+                  <Shield className="w-3.5 h-3.5 text-indigo-500" aria-hidden="true" />
+                  <span>Админ-панель и квоты</span>
+                </button>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  onSelectNav('history');
+                  setProfileMenuOpen(false);
+                }}
+                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60"
+              >
+                История активности
+              </button>
+              {onLogout && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setProfileMenuOpen(false);
+                    onLogout();
+                  }}
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2"
+                >
+                  <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>{isDemoMode ? 'К экрану входа' : 'Выйти из аккаунта'}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => setProfileMenuOpen(false)}
+                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60"
+              >
+                Закрыть меню
+              </button>
+            </div>
+          )}
+        </div>
       </div>
     </aside>
   );
@@ -618,7 +602,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   return (
     <>
       {/* Desktop Sidebar */}
-      <div className="hidden md:block h-full shrink-0">{sidebarContent}</div>
+      <div className="hidden md:block h-full min-h-0 shrink-0">{sidebarContent}</div>
 
       {/* Mobile Drawer Overlay */}
       {mobileOpen && (

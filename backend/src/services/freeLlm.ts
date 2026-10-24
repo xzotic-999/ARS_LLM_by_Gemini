@@ -96,6 +96,16 @@ export function buildFreeLlmHeaders(
 }
 
 /**
+ * Normalizes a FreeLLMAPI / OpenAI-compatible base URL:
+ * strips trailing slashes and appends `/v1` if no `/v1` suffix is present.
+ */
+export function normalizeFreeLlmBaseUrl(rawUrl: string): string {
+  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+/**
  * Resolves the ordered list of configured AI provider endpoints (primary FreeLLMAPI
  * endpoint followed by optional fallback endpoint if configured).
  */
@@ -106,10 +116,11 @@ export function resolveProviderEndpoints(
   const endpoints: FreeLlmProviderEndpoint[] = [];
 
   const primaryKey = (config.FREELLM_API_KEY ?? "").trim();
-  if (config.FREELLM_API_BASE_URL && !PLACEHOLDER_API_KEYS.has(primaryKey)) {
+  const primaryBaseUrl = normalizeFreeLlmBaseUrl(config.FREELLM_API_BASE_URL ?? "");
+  if (primaryBaseUrl && !PLACEHOLDER_API_KEYS.has(primaryKey)) {
     endpoints.push({
       name: "primary",
-      baseUrl: config.FREELLM_API_BASE_URL.replace(/\/+$/, ""),
+      baseUrl: primaryBaseUrl,
       apiKey: primaryKey,
       model: config.FREELLM_MODEL || "auto",
       timeoutMs,
@@ -117,10 +128,13 @@ export function resolveProviderEndpoints(
   }
 
   const fallbackKey = (config.FREELLM_FALLBACK_API_KEY ?? "").trim();
-  if (config.FREELLM_FALLBACK_BASE_URL && !PLACEHOLDER_API_KEYS.has(fallbackKey)) {
+  const fallbackBaseUrl = normalizeFreeLlmBaseUrl(
+    config.FREELLM_FALLBACK_BASE_URL ?? ""
+  );
+  if (fallbackBaseUrl && !PLACEHOLDER_API_KEYS.has(fallbackKey)) {
     endpoints.push({
       name: "fallback",
-      baseUrl: config.FREELLM_FALLBACK_BASE_URL.replace(/\/+$/, ""),
+      baseUrl: fallbackBaseUrl,
       apiKey: fallbackKey,
       model: config.FREELLM_FALLBACK_MODEL || config.FREELLM_MODEL || "auto",
       timeoutMs,
@@ -427,13 +441,11 @@ export async function verifyFreeLlmConnection(
   customConfig?: Partial<FreeLlmRuntimeConfig>,
   fetchFn: typeof fetch = fetch
 ): Promise<FreeLlmVerificationReport> {
-  const baseUrl = (
+  const baseUrl = normalizeFreeLlmBaseUrl(
     customConfig?.FREELLM_API_BASE_URL ??
-    env.FREELLM_API_BASE_URL ??
-    "https://v7skvft7-31415.euw.devtunnels.ms/v1"
-  )
-    .trim()
-    .replace(/\/+$/, "");
+      env.FREELLM_API_BASE_URL ??
+      "https://v7skvft7-31415.euw.devtunnels.ms/v1"
+  );
 
   const model =
     (customConfig?.FREELLM_MODEL ?? env.FREELLM_MODEL ?? "auto").trim() ||

@@ -370,23 +370,64 @@ export default function App() {
     setStreamError(null);
     setLastSubmittedPrompt({ text: trimmed, attachments });
 
-    // Demo mode uses deterministic local response logic
+    // Demo / Preview workspace mode: stream real completion via server-side /api/v1/chat/completions
     if (isDemoMode) {
-      const res = submitChatPrompt({
-        existingSession: activeSession,
-        promptText: trimmed,
-        attachments,
+      const nowStamp = 'Сейчас';
+      const userMsg: ChatMessage = {
+        id: `msg-u-${Date.now()}`,
+        role: 'user',
+        content: trimmed,
+        timestamp: nowStamp,
+        attachments: attachments.length > 0 ? [...attachments] : undefined,
+      };
+
+      const streamingAssistantId = `stream-a-${Date.now()}`;
+      const assistantPlaceholder: ChatMessage = {
+        id: streamingAssistantId,
+        role: 'assistant',
+        content: '',
+        timestamp: nowStamp,
+        isStreaming: true,
+      };
+
+      const baseSession: ChatSession = activeSession ?? {
+        id: `sess-${Date.now()}`,
+        title: trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed,
         categoryId: activeCategoryId ?? 'code',
-        modelParams,
-      });
-      if (!res.ok) return;
+        updatedAt: 'Только что',
+        starred: false,
+        messages: [],
+      };
+
+      const targetSessionId = baseSession.id;
+      const promptWithAttachments =
+        attachments.length > 0
+          ? `${trimmed}\n\n[Прикрепленные файлы: ${attachments.join(', ')}]`
+          : trimmed;
+
+      const historyForModel = [
+        ...baseSession.messages.map((m) => ({
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+        })),
+        { role: 'user' as const, content: promptWithAttachments },
+      ];
+
+      const updatedSession: ChatSession = {
+        ...baseSession,
+        updatedAt: 'Только что',
+        messages: [...baseSession.messages, userMsg, assistantPlaceholder],
+      };
 
       if (activeSession) {
-        setSessions((prev) => prev.map((s) => (s.id === res.session.id ? res.session : s)));
+        setSessions((prev) =>
+          prev.map((s) => (s.id === targetSessionId ? updatedSession : s))
+        );
       } else {
-        setSessions((prev) => [res.session, ...prev]);
-        setActiveSessionId(res.session.id);
+        setSessions((prev) => [updatedSession, ...prev]);
+        setActiveSessionId(targetSessionId);
       }
+
       setQuotas((prev) =>
         prev
           ? {
@@ -397,6 +438,77 @@ export default function App() {
       );
       setActiveNav('chats');
       setPromptValue('');
+
+      setIsStreaming(true);
+      const abortController = new AbortController();
+      streamAbortRef.current = abortController;
+      let accumulatedReply = '';
+
+      await chatApi.streamCompletions(
+        historyForModel,
+        (token) => {
+          accumulatedReply += token;
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSessionId
+                ? {
+                    ...s,
+                    messages: s.messages.map((m) =>
+                      m.id === streamingAssistantId
+                        ? { ...m, content: accumulatedReply }
+                        : m
+                    ),
+                  }
+                : s
+            )
+          );
+        },
+        () => {
+          setIsStreaming(false);
+          streamAbortRef.current = null;
+          const finalContent = accumulatedReply.trim();
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSessionId
+                ? {
+                    ...s,
+                    messages: s.messages.map((m) =>
+                      m.id === streamingAssistantId
+                        ? {
+                            ...m,
+                            content: finalContent || 'Генерация остановлена.',
+                            isStreaming: false,
+                          }
+                        : m
+                    ),
+                  }
+                : s
+            )
+          );
+        },
+        (err) => {
+          setIsStreaming(false);
+          streamAbortRef.current = null;
+          setStreamError(err.message);
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === targetSessionId
+                ? {
+                    ...s,
+                    messages: s.messages
+                      .filter(
+                        (m) => !(m.id === streamingAssistantId && !m.content.trim())
+                      )
+                      .map((m) =>
+                        m.id === streamingAssistantId ? { ...m, isStreaming: false } : m
+                      ),
+                  }
+                : s
+            )
+          );
+        },
+        abortController.signal
+      );
       return;
     }
 
@@ -622,7 +734,7 @@ export default function App() {
   }
 
   return (
-    <div className="theme-transition min-h-screen w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col md:p-4 lg:p-5">
+    <div className="theme-transition h-screen overflow-hidden w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col md:p-4 lg:p-5">
       {/* WCAG Skip Link for Keyboard Users */}
       <a
         href="#main-workspace"
@@ -632,7 +744,7 @@ export default function App() {
       </a>
 
       {/* Outer Dashboard Frame matching the reference screenshot */}
-      <div className="flex-1 flex w-full max-w-[1440px] mx-auto md:rounded-[24px] overflow-hidden border border-[#E2E5EE] dark:border-slate-800/90 bg-white dark:bg-[#0E1322] shadow-[0_14px_44px_rgba(15,23,42,0.06)] dark:shadow-[0_14px_44px_rgba(0,0,0,0.45)] min-h-[calc(100vh-2.5rem)] md:h-[calc(100vh-2.5rem)]">
+      <div className="flex-1 min-h-0 flex w-full max-w-[1440px] mx-auto md:rounded-[24px] overflow-hidden border border-[#E2E5EE] dark:border-slate-800/90 bg-white dark:bg-[#0E1322] shadow-[0_14px_44px_rgba(15,23,42,0.06)] dark:shadow-[0_14px_44px_rgba(0,0,0,0.45)] h-full">
         {/* Left Sidebar */}
         <Sidebar
           activeNav={activeNav}
@@ -671,7 +783,7 @@ export default function App() {
         />
 
         {/* Right Main Content Area */}
-        <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-[#0E1322]">
+        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-white dark:bg-[#0E1322]">
           <TopBar
             title={topBarTitle}
             theme={theme}
@@ -684,7 +796,9 @@ export default function App() {
           <main
             id="main-workspace"
             tabIndex={-1}
-            className="flex-1 flex flex-col overflow-y-auto focus:outline-none"
+            className={`flex-1 min-h-0 flex flex-col focus:outline-none ${
+              activeSession && !showNewChatWelcome ? 'overflow-hidden' : 'overflow-y-auto'
+            }`}
           >
             {showNewChatWelcome ? (
               <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 py-8 md:py-12">

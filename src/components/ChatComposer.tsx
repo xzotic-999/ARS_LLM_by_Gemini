@@ -30,6 +30,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const [composerError, setComposerError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const hasText = promptValue.trim().length > 0;
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -76,7 +78,9 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   return (
     <section
       aria-label="Создание нового сообщения"
-      className="w-full max-w-[680px] mx-auto rounded-[20px] border border-[#E5E7EB] dark:border-slate-800 bg-[#FAFAFC] dark:bg-[#131829] p-4 shadow-[0_4px_20px_rgba(15,23,42,0.03)]"
+      className={`w-full ${
+        compact ? 'max-w-[820px] p-2.5 rounded-[18px]' : 'max-w-[680px] p-4 rounded-[20px]'
+      } mx-auto border border-[#E5E7EB] dark:border-slate-800 bg-[#FAFAFC] dark:bg-[#131829] shadow-[0_4px_20px_rgba(15,23,42,0.03)]`}
     >
       {/* Top Row inside Outer Card: Icon + "Начать новый чат" + Sliders Button */}
       {!compact && (
@@ -119,7 +123,11 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       )}
 
       {/* Inner White/Dark Box */}
-      <div className="rounded-[14px] border border-[#E6E8F0] dark:border-slate-800 bg-white dark:bg-[#0E1322] p-4">
+      <div
+        className={`rounded-[14px] border border-[#E6E8F0] dark:border-slate-800 bg-white dark:bg-[#0E1322] ${
+          compact ? 'p-3' : 'p-4'
+        }`}
+      >
         <div className="relative">
           <label htmlFor="chat-prompt-textarea" className="sr-only">
             Чем я могу помочь вам сегодня?
@@ -134,20 +142,23 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             }}
             onKeyDown={handleKeyDown}
             placeholder="Чем я могу помочь вам сегодня?"
-            className="focus-ring w-full resize-none bg-transparent text-[14.5px] leading-relaxed text-[#111827] dark:text-slate-100 placeholder:text-[#6B7280] dark:placeholder:text-slate-400 pr-11"
+            className="focus-ring w-full resize-none bg-transparent text-[14px] leading-relaxed text-[#111827] dark:text-slate-100 placeholder:text-[#6B7280] dark:placeholder:text-slate-400 pr-11"
           />
 
-          {/* Submit Action Button (visible when text is entered) */}
-          {promptValue.trim().length > 0 && (
-            <button
-              type="button"
-              onClick={triggerSubmit}
-              aria-label="Отправить сообщение"
-              className="focus-ring absolute right-0 bottom-1 w-9 h-9 rounded-xl flex items-center justify-center transition-all bg-[#5046E5] text-white hover:bg-[#4338CA] shadow-xs"
-            >
-              <Send className="w-4 h-4" aria-hidden="true" />
-            </button>
-          )}
+          {/* Always-visible Submit Action Button */}
+          <button
+            type="button"
+            onClick={triggerSubmit}
+            aria-label="Отправить сообщение"
+            title="Отправить сообщение (Enter)"
+            className={`focus-ring absolute right-0 bottom-1 w-9 h-9 rounded-xl flex items-center justify-center transition-all ${
+              hasText
+                ? 'bg-[#5046E5] text-white hover:bg-[#4338CA] shadow-xs cursor-pointer'
+                : 'bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-700'
+            }`}
+          >
+            <Send className="w-4 h-4" aria-hidden="true" />
+          </button>
         </div>
 
         {/* Attached Files List (if any) */}
@@ -203,41 +214,46 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         />
 
         {/* Hairline Divider inside Input Box */}
-        <div className="my-3 border-t border-[#ECEEF4] dark:border-slate-800/90" role="separator" />
+        <div
+          className={`${compact ? 'my-2' : 'my-3'} border-t border-[#ECEEF4] dark:border-slate-800/90`}
+          role="separator"
+        />
 
         {/* Action Buttons Row */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          <button
-            type="button"
-            onClick={handleAttachButtonClick}
-            className="focus-ring h-[36px] px-3.5 rounded-[10px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/70 hover:bg-slate-50 dark:hover:bg-slate-800 text-[13px] font-medium text-[#1F2937] dark:text-slate-200 flex items-center gap-2 transition-colors whitespace-nowrap"
-          >
-            <Paperclip className="w-[15px] h-[15px] text-[#374151] dark:text-slate-300 stroke-[1.8]" aria-hidden="true" />
-            <span>Прикрепить файл</span>
-          </button>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleAttachButtonClick}
+              className="focus-ring h-[34px] px-3 rounded-[10px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/70 hover:bg-slate-50 dark:hover:bg-slate-800 text-[12.5px] font-medium text-[#1F2937] dark:text-slate-200 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <Paperclip className="w-[14px] h-[14px] text-[#374151] dark:text-slate-300 stroke-[1.8]" aria-hidden="true" />
+              <span>Прикрепить файл</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={handleToggleVoice}
-            aria-pressed={isRecordingVoice}
-            className={`focus-ring h-[36px] px-3.5 rounded-[10px] border text-[13px] font-medium flex items-center gap-2 transition-colors whitespace-nowrap ${
-              isRecordingVoice
-                ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300'
-                : 'border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/70 hover:bg-slate-50 dark:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200'
-            }`}
-          >
-            <Mic className="w-[15px] h-[15px] stroke-[1.8]" aria-hidden="true" />
-            <span>Голосовой ввод</span>
-          </button>
+            <button
+              type="button"
+              onClick={handleToggleVoice}
+              aria-pressed={isRecordingVoice}
+              className={`focus-ring h-[34px] px-3 rounded-[10px] border text-[12.5px] font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap ${
+                isRecordingVoice
+                  ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300'
+                  : 'border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/70 hover:bg-slate-50 dark:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200'
+              }`}
+            >
+              <Mic className="w-[14px] h-[14px] stroke-[1.8]" aria-hidden="true" />
+              <span>Голосовой ввод</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={onOpenPromptLibrary}
-            className="focus-ring h-[36px] px-3.5 rounded-[10px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/70 hover:bg-slate-50 dark:hover:bg-slate-800 text-[13px] font-medium text-[#1F2937] dark:text-slate-200 flex items-center gap-2 transition-colors whitespace-nowrap"
-          >
-            <FileText className="w-[15px] h-[15px] text-[#374151] dark:text-slate-300 stroke-[1.8]" aria-hidden="true" />
-            <span>Библиотека промптов</span>
-          </button>
+            <button
+              type="button"
+              onClick={onOpenPromptLibrary}
+              className="focus-ring h-[34px] px-3 rounded-[10px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/70 hover:bg-slate-50 dark:hover:bg-slate-800 text-[12.5px] font-medium text-[#1F2937] dark:text-slate-200 flex items-center gap-1.5 transition-colors whitespace-nowrap"
+            >
+              <FileText className="w-[14px] h-[14px] text-[#374151] dark:text-slate-300 stroke-[1.8]" aria-hidden="true" />
+              <span>Библиотека промптов</span>
+            </button>
+          </div>
         </div>
       </div>
     </section>

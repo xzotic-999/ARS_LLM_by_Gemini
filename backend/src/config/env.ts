@@ -175,8 +175,13 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
 
   const DEFAULT_CLOUD_FREELLM_BASE_URL =
     "https://v7skvft7-31415.euw.devtunnels.ms/v1";
-  const rawFreeLlmBaseUrl = (rawEnv.FREELLM_API_BASE_URL ?? "").trim();
-  const freeLlmBaseUrl = rawFreeLlmBaseUrl || DEFAULT_CLOUD_FREELLM_BASE_URL;
+  const rawFreeLlmBaseUrl = (rawEnv.FREELLM_API_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  const normalizedRawBaseUrl = rawFreeLlmBaseUrl
+    ? rawFreeLlmBaseUrl.endsWith("/v1")
+      ? rawFreeLlmBaseUrl
+      : `${rawFreeLlmBaseUrl}/v1`
+    : "";
+  const freeLlmBaseUrl = normalizedRawBaseUrl || DEFAULT_CLOUD_FREELLM_BASE_URL;
 
   if (!freeLlmBaseUrl) {
     throw new Error(
