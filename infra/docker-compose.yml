@@ -2,12 +2,24 @@ services:
   postgres:
     image: postgres:15-alpine
     container_name: ars_llm_postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: ars_llm_db
-      POSTGRES_USER: ars_llm_user
+      POSTGRES_DB: "${POSTGRES_DB:-ars_llm_db}"
+      POSTGRES_USER: "${POSTGRES_USER:-ars_llm_user}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
+    # Port 5432 is intentionally NOT published to the host.
+    # Database access is restricted to the internal Docker network (ars_llm_network).
+    # If local host inspection is ever required, uncomment the line below (bound to 127.0.0.1 only):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-ars_llm_user} -d $${POSTGRES_DB:-ars_llm_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
     networks:
       - ars_llm_network
 
@@ -16,19 +28,34 @@ services:
       context: ..
       dockerfile: backend/Dockerfile
     container_name: ars_llm_backend
+    restart: unless-stopped
     environment:
+      NODE_ENV: "${NODE_ENV:-development}"
+      PORT: "${PORT:-3000}"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
-      POSTGRES_USER: ars_llm_user
+      POSTGRES_USER: "${POSTGRES_USER:-ars_llm_user}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}"
-      POSTGRES_DB: ars_llm_db
-      FREELLM_API_BASE_URL: "http://host.docker.internal:31415/v1"
-      FREELLM_MODEL: "auto"
-      FREELLM_API_KEY: "${FREELLM_API_KEY:?FreeLLMAPI key required}"
+      POSTGRES_DB: "${POSTGRES_DB:-ars_llm_db}"
+      SESSION_SECRET: "${SESSION_SECRET:?SESSION_SECRET required}"
+      SESSION_MAX_AGE_MS: "${SESSION_MAX_AGE_MS:-86400000}"
+      RATE_LIMIT_WINDOW_MS: "${RATE_LIMIT_WINDOW_MS:-900000}"
+      RATE_LIMIT_MAX_REQUESTS: "${RATE_LIMIT_MAX_REQUESTS:-30}"
+      DAILY_QUOTA_DEFAULT: "${DAILY_QUOTA_DEFAULT:-20}"
+      MONTHLY_QUOTA_DEFAULT: "${MONTHLY_QUOTA_DEFAULT:-500}"
+      ADMIN_BOOTSTRAP_EMAIL: "${ADMIN_BOOTSTRAP_EMAIL:?ADMIN_BOOTSTRAP_EMAIL required}"
+      ADMIN_BOOTSTRAP_PASSWORD: "${ADMIN_BOOTSTRAP_PASSWORD:?ADMIN_BOOTSTRAP_PASSWORD required}"
+      ADMIN_BOOTSTRAP_NAME: "${ADMIN_BOOTSTRAP_NAME:-Administrator}"
+      FREELLM_API_BASE_URL: "${FREELLM_API_BASE_URL:-http://host.docker.internal:31415/v1}"
+      FREELLM_MODEL: "${FREELLM_MODEL:-auto}"
+      FREELLM_API_KEY: "${FREELLM_API_KEY:?FREELLM_API_KEY required}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
-      - "3000:3000"
+      - "127.0.0.1:${PORT:-3000}:3000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - ars_llm_network
 
@@ -39,3 +66,4 @@ volumes:
 networks:
   ars_llm_network:
     driver: bridge
+

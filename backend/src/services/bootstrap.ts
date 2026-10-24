@@ -2,53 +2,101 @@ import { pool } from "../db/index.js";
 import { hashPassword } from "./password.js";
 import env from "../config/index.js";
 
+export interface QueryExecutor {
+  query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, unknown>> }>;
+}
+
+export interface BootstrapAdminConfig {
+  email: string;
+  password: string;
+  name: string;
+  nodeEnv?: string;
+}
+
+/**
+ * Validates bootstrap admin credentials when a new admin needs to be created.
+ * Rejects missing credentials or forbidden default passwords ('ChangeMe123!').
+ */
+export function validateBootstrapCredentials(config: BootstrapAdminConfig): {
+  email: string;
+  password: string;
+  name: string;
+} {
+  const email = config.email.trim();
+  const password = config.password;
+  const name = config.name.trim() || "Administrator";
+
+  if (!email) {
+    throw new Error(
+      "[BOOTSTRAP] ADMIN_BOOTSTRAP_EMAIL is required to create the initial administrator."
+    );
+  }
+
+  if (!password) {
+    throw new Error(
+      "[BOOTSTRAP] ADMIN_BOOTSTRAP_PASSWORD is required to create the initial administrator."
+    );
+  }
+
+  if (
+    password === "ChangeMe123!" ||
+    (config.nodeEnv === "production" && password === "CHANGE_ME_INITIAL_ADMIN_PASSWORD")
+  ) {
+    throw new Error(
+      "[BOOTSTRAP] Refusing to initialize administrator with an insecure default or placeholder password."
+    );
+  }
+
+  return { email, password, name };
+}
+
 /**
  * Ensures that at least one active admin user exists in the database.
- * If no admin exists, creates one from environment variables or a secure default.
+ * - If an active admin already exists, returns immediately without modifying credentials.
+ * - If a user with ADMIN_BOOTSTRAP_EMAIL exists, promotes them to active admin without changing their password.
+ * - Otherwise creates the initial admin using validated environment credentials and never logs any password.
  */
-export async function ensureBootstrapAdmin(): Promise<void> {
-  try {
-    const adminCheck = await pool.query(
-      "SELECT id FROM users WHERE role = 'admin' AND is_active = true LIMIT 1"
-    );
-
-    if (adminCheck.rows.length > 0) {
-      console.log("Bootstrap admin already exists.");
-      return;
-    }
-
-    const email = env.ADMIN_BOOTSTRAP_EMAIL || "admin@ars_llm.local";
-    const password = env.ADMIN_BOOTSTRAP_PASSWORD || "ChangeMe123!";
-    const name = env.ADMIN_BOOTSTRAP_NAME || "Administrator";
-
-    // Check if user with this email already exists
-    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
-
-    if (existing.rows.length > 0) {
-      // Promote existing user to admin
-      await pool.query(
-        "UPDATE users SET role = 'admin', is_active = true WHERE email = $1",
-        [email]
-      );
-      console.log(`Promoted existing user ${email} to admin.`);
-      return;
-    }
-
-    const passwordHash = await hashPassword(password);
-
-    await pool.query(
-      `INSERT INTO users (name, email, password, role, is_active, email_verified)
-       VALUES ($1, $2, $3, 'admin', true, true)`,
-      [name, email, passwordHash]
-    );
-
-    console.log(`[BOOTSTRAP] Created default admin user: ${email}`);
-    if (!env.ADMIN_BOOTSTRAP_PASSWORD) {
-      console.log(
-        "[BOOTSTRAP] WARNING: Using default password 'ChangeMe123!'. Change it immediately!"
-      );
-    }
-  } catch (err) {
-    console.error("Failed to ensure bootstrap admin:", err);
+export async function ensureBootstrapAdmin(
+  db: QueryExecutor = pool,
+  config: BootstrapAdminConfig = {
+    email: env.ADMIN_BOOTSTRAP_EMAIL,
+    password: env.ADMIN_BOOTSTRAP_PASSWORD,
+    name: env.ADMIN_BOOTSTRAP_NAME,
+    nodeEnv: env.NODE_ENV,
   }
+): Promise<"existing_admin" | "promoted_existing_user" | "created_admin"> {
+  const adminCheck = await db.query(
+    "SELECT id FROM users WHERE role = 'admin' AND is_active = true LIMIT 1"
+  );
+
+  if (adminCheck.rows.length > 0) {
+    console.log("[BOOTSTRAP] Active admin already exists; skipping bootstrap.");
+    return "existing_admin";
+  }
+
+  const { email, password, name } = validateBootstrapCredentials(config);
+
+  // Check if user with this email already exists
+  const existing = await db.query("SELECT id FROM users WHERE email = $1", [email]);
+
+  if (existing.rows.length > 0) {
+    // Promote existing user to admin without overwriting their existing password hash
+    await db.query(
+      "UPDATE users SET role = 'admin', is_active = true WHERE email = $1",
+      [email]
+    );
+    console.log(`[BOOTSTRAP] Promoted existing user ${email} to active admin.`);
+    return "promoted_existing_user";
+  }
+
+  const passwordHash = await hashPassword(password);
+
+  await db.query(
+    `INSERT INTO users (name, email, password, role, is_active, email_verified)
+     VALUES ($1, $2, $3, 'admin', true, true)`,
+    [name, email, passwordHash]
+  );
+
+  console.log(`[BOOTSTRAP] Created initial admin user: ${email}`);
+  return "created_admin";
 }

@@ -4,12 +4,11 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Copy backend source and config files relative to the project root
-COPY backend/package.json package.json
-COPY backend/package-lock.json package-lock.json
+COPY backend/package*.json ./
 COPY backend/tsconfig.json tsconfig.json
 
 # Install all dependencies (including dev) needed for build
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 # Copy source files and mandatory corporate Instruction.md
 COPY backend/src ./src

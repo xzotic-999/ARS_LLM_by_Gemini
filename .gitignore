@@ -7,5 +7,24 @@ coverage/
 .playwright-cli/
 .DS_Store
 *.log
-.env*
+
+# Environment & Secrets
+.env
+.env.*
 !.env.example
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+
+# Backups & Database Dumps
+*.bak
+*.backup
+*.old
+*.orig
+*.tmp
+*.swp
+*.dump
+*.sql.gz
+

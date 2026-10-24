@@ -127,7 +127,13 @@ const server = app.listen(port, async () => {
   try {
     await ensureBootstrapAdmin();
   } catch (err) {
-    console.error('Bootstrap admin failed:', err);
+    console.error(
+      'Bootstrap admin initialization failed:',
+      err instanceof Error ? err.message : err
+    );
+    if (env.NODE_ENV === 'production') {
+      process.exit(1);
+    }
   }
 });
 

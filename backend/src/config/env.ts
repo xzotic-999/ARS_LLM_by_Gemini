@@ -8,7 +8,8 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(currentDir, "../../../");
 dotenv.config({ path: resolve(projectRoot, ".env") });
 
-interface Env {
+export interface Env {
+  NODE_ENV: string;
   PORT: number;
   POSTGRES_HOST?: string;
   POSTGRES_PORT: number;
@@ -30,61 +31,121 @@ interface Env {
   DB_URL: string;
 }
 
-// Build the required environment variables.
-const env: Env = {
-  PORT: Number(process.env.PORT ?? 3000),
+const INSECURE_PASSWORD_BLACKLIST = new Set([
+  "ChangeMe123!",
+  "CHANGE_ME_INITIAL_ADMIN_PASSWORD",
+  "CHANGE_ME_POSTGRES_PASSWORD",
+  "password",
+  "admin",
+  "123456",
+]);
 
-  POSTGRES_HOST: process.env.POSTGRES_HOST ?? "postgres",
-  POSTGRES_PORT: Number(process.env.POSTGRES_PORT ?? 5432),
-  POSTGRES_USER: process.env.POSTGRES_USER ?? "",
-  POSTGRES_PASSWORD: process.env.POSTGRES_PASSWORD ?? "",
-  POSTGRES_DB: process.env.POSTGRES_DB ?? "",
+const INSECURE_SECRET_BLACKLIST = new Set([
+  "CHANGE_ME_MIN_32_CHARS_SESSION_SECRET_KEY",
+  "CHANGE_ME_FREELLM_API_KEY",
+  "changeme",
+  "secret",
+]);
 
-  FREELLM_API_BASE_URL:
-    process.env.FREELLM_API_BASE_URL ??
-    "http://host.docker.internal:31415/v1",
-  FREELLM_API_KEY: process.env.FREELLM_API_KEY ?? "",
-  FREELLM_MODEL: process.env.FREELLM_MODEL ?? "auto",
+/**
+ * Validates environment configuration and throws a descriptive error if
+ * mandatory variables are missing or insecure default values are used.
+ */
+export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
+  const nodeEnv = rawEnv.NODE_ENV ?? "development";
+  const isProd = nodeEnv === "production";
 
-  SESSION_SECRET: process.env.SESSION_SECRET ?? "",
-  SESSION_MAX_AGE_MS: Number(process.env.SESSION_MAX_AGE_MS ?? 86400000), // 24h
-  RATE_LIMIT_WINDOW_MS: Number(process.env.RATE_LIMIT_WINDOW_MS ?? 900000), // 15min
-  RATE_LIMIT_MAX_REQUESTS: Number(process.env.RATE_LIMIT_MAX_REQUESTS ?? 30),
-  DAILY_QUOTA_DEFAULT: Number(process.env.DAILY_QUOTA_DEFAULT ?? 20),
-  MONTHLY_QUOTA_DEFAULT: Number(process.env.MONTHLY_QUOTA_DEFAULT ?? 500),
-  ADMIN_BOOTSTRAP_EMAIL: process.env.ADMIN_BOOTSTRAP_EMAIL ?? "",
-  ADMIN_BOOTSTRAP_PASSWORD: process.env.ADMIN_BOOTSTRAP_PASSWORD ?? "",
-  ADMIN_BOOTSTRAP_NAME: process.env.ADMIN_BOOTSTRAP_NAME ?? "Administrator",
-  DB_URL:
-    process.env.DB_URL ??
-    `postgresql://${process.env.POSTGRES_USER ?? ""}:${process.env.POSTGRES_PASSWORD ?? ""}@${process.env.POSTGRES_HOST ?? "postgres"}:${process.env.POSTGRES_PORT ?? 5432}/${process.env.POSTGRES_DB ?? ""}`,
-};
+  const postgresHost = rawEnv.POSTGRES_HOST ?? "postgres";
+  const postgresPort = Number(rawEnv.POSTGRES_PORT ?? 5432);
+  const postgresUser = (rawEnv.POSTGRES_USER ?? "").trim();
+  const postgresPassword = rawEnv.POSTGRES_PASSWORD ?? "";
+  const postgresDb = (rawEnv.POSTGRES_DB ?? "").trim();
 
-// Validate required PostgreSQL environment variables.
-if (
-  !env.POSTGRES_USER ||
-  !env.POSTGRES_PASSWORD ||
-  !env.POSTGRES_DB
-) {
-  throw new Error(
-    "Missing required PostgreSQL environment variables. Check .env and .env.example"
-  );
-}
-
-// SESSION_SECRET is required for session-based auth.
-// In development, fall back to a generated value so the app can start without
-// the owner having to configure it. In production, a missing value is fatal.
-if (!env.SESSION_SECRET) {
-  if (process.env.NODE_ENV === "production") {
+  if (!postgresUser || !postgresPassword || !postgresDb) {
     throw new Error(
-      "SESSION_SECRET is required in production. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+      "Missing required PostgreSQL environment variables (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB). Check .env and .env.example"
     );
   }
-  // Dev fallback — only safe because sessions are short-lived and local.
-  env.SESSION_SECRET = randomBytes(32).toString("hex");
-  console.warn(
-    "SESSION_SECRET not set — using a generated dev-only value. Set SESSION_SECRET in .env for production."
-  );
+
+  if (isProd && INSECURE_PASSWORD_BLACKLIST.has(postgresPassword)) {
+    throw new Error(
+      "Insecure placeholder POSTGRES_PASSWORD detected in production. Set a strong secret in .env."
+    );
+  }
+
+  let sessionSecret = (rawEnv.SESSION_SECRET ?? "").trim();
+  if (!sessionSecret) {
+    if (isProd) {
+      throw new Error(
+        "SESSION_SECRET is required in production. Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+      );
+    }
+    sessionSecret = randomBytes(32).toString("hex");
+    console.warn(
+      "SESSION_SECRET not set — using a generated dev-only value. Set SESSION_SECRET in .env for production."
+    );
+  } else if (isProd && (sessionSecret.length < 32 || INSECURE_SECRET_BLACKLIST.has(sessionSecret))) {
+    throw new Error(
+      "SESSION_SECRET in production must be at least 32 characters and not a placeholder value."
+    );
+  }
+
+  const freellmApiKey = (rawEnv.FREELLM_API_KEY ?? "").trim();
+  if (isProd && (!freellmApiKey || INSECURE_SECRET_BLACKLIST.has(freellmApiKey))) {
+    throw new Error(
+      "FREELLM_API_KEY is required in production and must not use a placeholder value."
+    );
+  }
+
+  const adminBootstrapEmail = (rawEnv.ADMIN_BOOTSTRAP_EMAIL ?? "").trim();
+  const adminBootstrapPassword = rawEnv.ADMIN_BOOTSTRAP_PASSWORD ?? "";
+
+  if (adminBootstrapPassword === "ChangeMe123!") {
+    throw new Error(
+      "Default password 'ChangeMe123!' is forbidden. Set a strong ADMIN_BOOTSTRAP_PASSWORD in .env."
+    );
+  }
+
+  if (isProd) {
+    if (!adminBootstrapEmail || !adminBootstrapPassword) {
+      throw new Error(
+        "ADMIN_BOOTSTRAP_EMAIL and ADMIN_BOOTSTRAP_PASSWORD are required in production."
+      );
+    }
+    if (INSECURE_PASSWORD_BLACKLIST.has(adminBootstrapPassword)) {
+      throw new Error(
+        "Insecure or placeholder ADMIN_BOOTSTRAP_PASSWORD is forbidden in production."
+      );
+    }
+  }
+
+  return {
+    NODE_ENV: nodeEnv,
+    PORT: Number(rawEnv.PORT ?? 3000),
+    POSTGRES_HOST: postgresHost,
+    POSTGRES_PORT: postgresPort,
+    POSTGRES_USER: postgresUser,
+    POSTGRES_PASSWORD: postgresPassword,
+    POSTGRES_DB: postgresDb,
+    FREELLM_API_BASE_URL:
+      rawEnv.FREELLM_API_BASE_URL ?? "http://host.docker.internal:31415/v1",
+    FREELLM_API_KEY: freellmApiKey,
+    FREELLM_MODEL: rawEnv.FREELLM_MODEL ?? "auto",
+    SESSION_SECRET: sessionSecret,
+    SESSION_MAX_AGE_MS: Number(rawEnv.SESSION_MAX_AGE_MS ?? 86400000),
+    RATE_LIMIT_WINDOW_MS: Number(rawEnv.RATE_LIMIT_WINDOW_MS ?? 900000),
+    RATE_LIMIT_MAX_REQUESTS: Number(rawEnv.RATE_LIMIT_MAX_REQUESTS ?? 30),
+    DAILY_QUOTA_DEFAULT: Number(rawEnv.DAILY_QUOTA_DEFAULT ?? 20),
+    MONTHLY_QUOTA_DEFAULT: Number(rawEnv.MONTHLY_QUOTA_DEFAULT ?? 500),
+    ADMIN_BOOTSTRAP_EMAIL: adminBootstrapEmail,
+    ADMIN_BOOTSTRAP_PASSWORD: adminBootstrapPassword,
+    ADMIN_BOOTSTRAP_NAME: (rawEnv.ADMIN_BOOTSTRAP_NAME ?? "Administrator").trim() || "Administrator",
+    DB_URL:
+      rawEnv.DB_URL ??
+      `postgresql://${postgresUser}:${postgresPassword}@${postgresHost}:${postgresPort}/${postgresDb}`,
+  };
 }
+
+const env: Env = validateEnvConfig(process.env);
 
 export default env;
