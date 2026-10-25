@@ -274,6 +274,14 @@ export const chatApi = {
         signal,
       });
 
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        throw new ApiError(
+          503,
+          'Серверный шлюз чата (/api/v1/chat/completions) вернул HTML вместо потока данных. Опубликуйте актуальную версию приложения (Publish) или проверьте работу VS Code Dev Tunnel.'
+        );
+      }
+
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         const message =
@@ -286,6 +294,17 @@ export const chatApi = {
         throw new ApiError(res.status, message);
       }
 
+      if (contentType.includes('application/json')) {
+        const data = await res.json().catch(() => null);
+        const fullText = data?.choices?.[0]?.message?.content;
+        if (typeof fullText === 'string' && fullText.trim().length > 0) {
+          onToken(fullText);
+          onDone();
+          return;
+        }
+        throw new Error(data?.error?.message || 'Сервер вернул пустой ответ.');
+      }
+
       const reader = res.body?.getReader();
       if (!reader) {
         throw new Error('Поток ответа недоступен');
@@ -294,6 +313,7 @@ export const chatApi = {
       const decoder = new TextDecoder();
       let buffer = '';
       let finished = false;
+      let receivedAnyToken = false;
 
       while (!finished) {
         const { done, value } = await reader.read();
@@ -305,6 +325,7 @@ export const chatApi = {
 
         for (const ev of events) {
           if (ev.type === 'delta') {
+            receivedAnyToken = true;
             onToken(ev.content);
           } else if (ev.type === 'error') {
             finished = true;
@@ -312,6 +333,14 @@ export const chatApi = {
             return;
           } else if (ev.type === 'done') {
             finished = true;
+            if (!receivedAnyToken && !signal?.aborted) {
+              onError(
+                new Error(
+                  'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.'
+                )
+              );
+              return;
+            }
             onDone();
             return;
           }
@@ -319,6 +348,14 @@ export const chatApi = {
       }
 
       if (!finished) {
+        if (!receivedAnyToken && !signal?.aborted) {
+          onError(
+            new Error(
+              'Не получен ответ от модели. Убедитесь, что FreeLLMAPI и VS Code Dev Tunnel активны.'
+            )
+          );
+          return;
+        }
         onDone();
       }
     } catch (err) {

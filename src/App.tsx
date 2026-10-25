@@ -46,6 +46,32 @@ import {
   QuotaLimits,
   UserProfile,
 } from './services/api';
+import type { AttachedFileItem } from './utils/fileExtractor';
+
+function buildPromptWithAttachments(
+  trimmedPrompt: string,
+  attachments: string[],
+  attachmentDetails?: AttachedFileItem[]
+): string {
+  if (!attachments || attachments.length === 0) return trimmedPrompt;
+
+  const sections: string[] = [];
+  if (attachmentDetails && attachmentDetails.length > 0) {
+    for (const item of attachmentDetails) {
+      if (item.extractedText && item.extractedText.trim()) {
+        sections.push(
+          `--- Содержимое файла "${item.name}" ---\n${item.extractedText.trim()}\n--- Конец файла "${item.name}" ---`
+        );
+      } else {
+        sections.push(`[Прикрепленный файл: ${item.name}]`);
+      }
+    }
+  } else {
+    sections.push(`[Прикрепленные файлы: ${attachments.join(', ')}]`);
+  }
+
+  return `${trimmedPrompt}\n\n${sections.join('\n\n')}`;
+}
 
 const DEMO_USER: UserProfile = {
   id: 1,
@@ -99,6 +125,7 @@ export default function App() {
   const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState<{
     text: string;
     attachments: string[];
+    attachmentDetails?: AttachedFileItem[];
   } | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
 
@@ -363,12 +390,21 @@ export default function App() {
     setIsStreaming(false);
   };
 
-  const handleSubmitPrompt = async (text: string, attachments: string[]) => {
+  const handleSubmitPrompt = async (
+    text: string,
+    attachments: string[],
+    attachmentDetails?: AttachedFileItem[]
+  ) => {
     const trimmed = text.trim();
     if (!trimmed || isStreaming) return;
 
     setStreamError(null);
-    setLastSubmittedPrompt({ text: trimmed, attachments });
+    setLastSubmittedPrompt({ text: trimmed, attachments, attachmentDetails });
+    const promptWithAttachments = buildPromptWithAttachments(
+      trimmed,
+      attachments,
+      attachmentDetails
+    );
 
     // Demo / Preview workspace mode: stream real completion via server-side /api/v1/chat/completions
     if (isDemoMode) {
@@ -400,10 +436,6 @@ export default function App() {
       };
 
       const targetSessionId = baseSession.id;
-      const promptWithAttachments =
-        attachments.length > 0
-          ? `${trimmed}\n\n[Прикрепленные файлы: ${attachments.join(', ')}]`
-          : trimmed;
 
       const historyForModel = [
         ...baseSession.messages.map((m) => ({
@@ -558,7 +590,7 @@ export default function App() {
           role: m.role as 'user' | 'assistant',
           content: m.content,
         })),
-        { role: 'user' as const, content: trimmed },
+        { role: 'user' as const, content: promptWithAttachments },
       ];
 
       setSessions((prev) =>
@@ -674,7 +706,11 @@ export default function App() {
 
   const handleRetryLastPrompt = () => {
     if (!lastSubmittedPrompt || isStreaming) return;
-    handleSubmitPrompt(lastSubmittedPrompt.text, lastSubmittedPrompt.attachments);
+    handleSubmitPrompt(
+      lastSubmittedPrompt.text,
+      lastSubmittedPrompt.attachments,
+      lastSubmittedPrompt.attachmentDetails
+    );
   };
 
   const handleSelectQuickPrompt = (qp: QuickPrompt) => {

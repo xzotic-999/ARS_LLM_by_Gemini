@@ -268,3 +268,54 @@ test('Backend conversation mapping and SSE streaming parser work accurately', as
     message: 'Chat generation failed.',
   });
 });
+
+test('OpenXML (.xlsx) attachment extractor parses sharedStrings and worksheet rows accurately', async () => {
+  const { extractOpenXmlText } = await import('./fileExtractor');
+  const encoder = new TextEncoder();
+
+  function buildStoredZip(files: Array<{ name: string; content: string }>): ArrayBuffer {
+    const chunks: Uint8Array[] = [];
+    for (const f of files) {
+      const nameBytes = encoder.encode(f.name);
+      const dataBytes = encoder.encode(f.content);
+      const header = new Uint8Array(30 + nameBytes.length + dataBytes.length);
+      const view = new DataView(header.buffer);
+      view.setUint32(0, 0x04034b50, true); // Local file header signature
+      view.setUint16(8, 0, true); // Stored (no compression)
+      view.setUint32(18, dataBytes.length, true); // Compressed size
+      view.setUint32(22, dataBytes.length, true); // Uncompressed size
+      view.setUint16(26, nameBytes.length, true); // File name length
+      view.setUint16(28, 0, true); // Extra field length
+      header.set(nameBytes, 30);
+      header.set(dataBytes, 30 + nameBytes.length);
+      chunks.push(header);
+    }
+
+    const totalLen = chunks.reduce((acc, c) => acc + c.byteLength, 0);
+    const out = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const c of chunks) {
+      out.set(c, offset);
+      offset += c.byteLength;
+    }
+    return out.buffer;
+  }
+
+  const zipBuffer = buildStoredZip([
+    {
+      name: 'xl/sharedStrings.xml',
+      content:
+        '<?xml version="1.0" encoding="UTF-8"?><sst><si><t>ОБРАЗЕЦ СПРАВКИ</t></si><si><t>Итого по отделу</t></si></sst>',
+    },
+    {
+      name: 'xl/worksheets/sheet1.xml',
+      content:
+        '<?xml version="1.0" encoding="UTF-8"?><worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row><row r="2"><c r="A2" t="s"><v>1</v></c><c r="B2"><v>145000</v></c></row></sheetData></worksheet>',
+    },
+  ]);
+
+  const extracted = await extractOpenXmlText(zipBuffer);
+  assert.ok(extracted.includes('ОБРАЗЕЦ СПРАВКИ'));
+  assert.ok(extracted.includes('Итого по отделу | 145000'));
+});
+

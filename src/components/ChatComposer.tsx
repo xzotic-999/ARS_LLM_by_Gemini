@@ -7,11 +7,16 @@ import {
   Send,
   X,
 } from 'lucide-react';
+import { AttachedFileItem, extractAttachmentText } from '../utils/fileExtractor';
 
 interface ChatComposerProps {
   promptValue: string;
   onPromptChange: (val: string) => void;
-  onSubmitPrompt: (text: string, attachments: string[]) => void;
+  onSubmitPrompt: (
+    text: string,
+    attachments: string[],
+    attachmentDetails?: AttachedFileItem[]
+  ) => void;
   onOpenPromptLibrary: () => void;
   onOpenModelParams: () => void;
   compact?: boolean;
@@ -25,7 +30,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   onOpenModelParams,
   compact = false,
 }) => {
-  const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<AttachedFileItem[]>([]);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -45,17 +50,22 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       return;
     }
     setComposerError(null);
-    onSubmitPrompt(promptValue, attachments);
+    onSubmitPrompt(
+      promptValue,
+      attachments.map((a) => a.name),
+      attachments
+    );
     setAttachments([]);
     setIsRecordingVoice(false);
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    const added = Array.from(files).map((f) => f.name);
-    setAttachments((prev) => [...prev, ...added]);
+    const fileList: File[] = Array.from(files);
     e.target.value = '';
+    const extracted = await Promise.all(fileList.map((f) => extractAttachmentText(f)));
+    setAttachments((prev) => [...prev, ...extracted]);
   };
 
   const handleAttachButtonClick = () => {
@@ -106,15 +116,15 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
         <div className="flex flex-wrap items-center gap-2 mt-2 pt-2 border-t border-slate-100 dark:border-slate-800/60">
           {attachments.map((file, idx) => (
             <span
-              key={`${file}-${idx}`}
+              key={`${file.name}-${idx}`}
               className="inline-flex items-center gap-1.5 text-[12px] text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-2.5 py-1 rounded-lg"
             >
               <Paperclip className="w-3 h-3 text-indigo-500" aria-hidden="true" />
-              <span>{file}</span>
+              <span>{file.name}</span>
               <button
                 type="button"
                 onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-                aria-label={`Удалить вложение ${file}`}
+                aria-label={`Удалить вложение ${file.name}`}
                 className="focus-ring text-slate-400 hover:text-slate-700 dark:hover:text-slate-100"
               >
                 <X className="w-3 h-3" />
