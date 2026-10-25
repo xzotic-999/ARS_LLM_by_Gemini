@@ -1,0 +1,6 @@
+{
+  "FREELLM_API_BASE_URL": "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+  "FREELLM_API_KEY": "freellmapi-e4ef2bdd6cbed040ae549bb85beb7c99a130bc35f15d8f44",
+  "FREELLM_MODEL": "auto",
+  "FREELLM_TIMEOUT_MS": 120000
+}

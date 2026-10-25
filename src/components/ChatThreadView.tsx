@@ -19,12 +19,17 @@ import {
 } from '../utils/dashboardLogic';
 import { ChatComposer } from './ChatComposer';
 import { MarkdownContent } from './MarkdownContent';
+import type { AttachedFileItem } from '../utils/fileExtractor';
 
 interface ChatThreadViewProps {
   session: ChatSession;
   promptValue: string;
   onPromptChange: (val: string) => void;
-  onSubmitPrompt: (text: string, attachments: string[]) => void;
+  onSubmitPrompt: (
+    text: string,
+    attachments: string[],
+    attachmentDetails?: AttachedFileItem[]
+  ) => void;
   onOpenPromptLibrary: () => void;
   onOpenModelParams: () => void;
   onToggleStar: (sessionId: string) => void;
@@ -143,63 +148,66 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
   };
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col h-full overflow-hidden max-w-[820px] mx-auto w-full px-4 md:px-6 pt-3 pb-3">
+    <div className="flex-1 min-h-0 flex flex-col h-full w-full overflow-hidden pt-3 pb-3">
       {/* Compact Single-Line Context Bar (no duplicate title; title is in TopBar) */}
-      <div className="shrink-0 flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-[#E6E8F0] dark:border-slate-800">
-        <div className="flex items-center gap-3 min-w-0">
-          <button
-            type="button"
-            onClick={onBackToWelcome}
-            aria-label="Вернуться на главный экран нового чата"
-            className="focus-ring px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[12.5px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 shrink-0"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" />
-            <span>Назад</span>
-          </button>
-          <p className="text-[12px] text-slate-500 dark:text-slate-400 truncate">
-            Обновлено: <span className="tabular-nums font-medium">{session.updatedAt}</span> · Сообщений:{' '}
-            <span className="tabular-nums font-medium">{session.messages.length}</span>
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          {isStreaming && onAbortStream && (
+      <div className="shrink-0 max-w-[820px] mx-auto w-full px-4 md:px-6">
+        <div className="flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-[#E6E8F0] dark:border-slate-800">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
-              onClick={onAbortStream}
-              aria-label="Остановить генерацию ответа"
-              className="focus-ring px-3 py-1 rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 text-[12px] font-semibold flex items-center gap-1.5"
+              onClick={onBackToWelcome}
+              aria-label="Вернуться на главный экран нового чата"
+              className="focus-ring px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[12.5px] font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center gap-1.5 shrink-0"
             >
-              <Square className="w-3 h-3 fill-current" aria-hidden="true" />
-              <span>Остановить генерацию</span>
+              <ArrowLeft className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Назад</span>
             </button>
-          )}
+            <p className="text-[12px] text-slate-500 dark:text-slate-400 truncate">
+              Обновлено: <span className="tabular-nums font-medium">{session.updatedAt}</span> · Сообщений:{' '}
+              <span className="tabular-nums font-medium">{session.messages.length}</span>
+            </p>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => onToggleStar(session.id)}
-            aria-pressed={Boolean(session.starred)}
-            aria-label={session.starred ? 'Убрать чат из избранного' : 'Добавить чат в избранное'}
-            className="focus-ring p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
-          >
-            <Star
-              className={`w-4 h-4 ${
-                session.starred ? 'text-[#F59E0B] fill-[#F59E0B]' : ''
-              }`}
-              aria-hidden="true"
-            />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {isStreaming && onAbortStream && (
+              <button
+                type="button"
+                onClick={onAbortStream}
+                aria-label="Остановить генерацию ответа"
+                className="focus-ring px-3 py-1 rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 text-[12px] font-semibold flex items-center gap-1.5"
+              >
+                <Square className="w-3 h-3 fill-current" aria-hidden="true" />
+                <span>Остановить генерацию</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => onToggleStar(session.id)}
+              aria-pressed={Boolean(session.starred)}
+              aria-label={session.starred ? 'Убрать чат из избранного' : 'Добавить чат в избранное'}
+              className="focus-ring p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <Star
+                className={`w-4 h-4 ${
+                  session.starred ? 'text-[#F59E0B] fill-[#F59E0B]' : ''
+                }`}
+                aria-hidden="true"
+              />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Scrollable Messages Feed */}
+      {/* Scrollable Messages Feed (full width so scrollbar sits cleanly at viewport edge) */}
       <div
         ref={messagesLogRef}
         role="log"
         aria-label="История сообщений чата"
         aria-live="polite"
-        className="flex-1 min-h-0 overflow-y-auto space-y-3.5 pr-1 pb-3"
+        className="flex-1 min-h-0 w-full overflow-y-auto pb-3"
       >
+        <div className="max-w-[820px] mx-auto w-full px-4 md:px-6 space-y-3.5">
         {session.messages.length === 0 ? (
           <div className="p-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] text-center text-[13.5px] text-slate-500 dark:text-slate-400">
             В этом диалоге пока нет сообщений. Отправьте вопрос ниже, чтобы начать.
@@ -370,10 +378,11 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
             )}
           </div>
         )}
+        </div>
       </div>
 
       {/* Pinned Follow-up Composer at Bottom of Viewport */}
-      <div className="pt-2 shrink-0">
+      <div className="pt-2 shrink-0 max-w-[820px] mx-auto w-full px-4 md:px-6">
         <ChatComposer
           promptValue={promptValue}
           onPromptChange={onPromptChange}

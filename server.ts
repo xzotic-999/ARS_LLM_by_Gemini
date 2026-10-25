@@ -51,16 +51,23 @@ function loadRuntimeConfig(): FreeLlmRuntimeConfig {
   dotenv.config({ path: path.resolve(__dirname, '.env'), override: true });
 
   let fileFallback: Partial<FreeLlmRuntimeConfig> = {};
-  const runtimeJsonPath = path.resolve(__dirname, '.aistudio/runtime-config.json');
-  try {
-    if (fs.existsSync(runtimeJsonPath)) {
-      const parsed = JSON.parse(fs.readFileSync(runtimeJsonPath, 'utf-8'));
-      if (parsed && typeof parsed === 'object') {
-        fileFallback = parsed;
+  const fallbackCandidates = [
+    path.resolve(__dirname, '.aistudio/runtime-config.json'),
+    path.resolve(__dirname, 'backend/src/config/tunnelRuntime.json'),
+  ];
+
+  for (const candidatePath of fallbackCandidates) {
+    try {
+      if (fs.existsSync(candidatePath)) {
+        const parsed = JSON.parse(fs.readFileSync(candidatePath, 'utf-8'));
+        if (parsed && typeof parsed === 'object' && parsed.FREELLM_API_KEY) {
+          fileFallback = parsed;
+          break;
+        }
       }
+    } catch {
+      // Ignore fallback file parse errors
     }
-  } catch {
-    // Ignore fallback file parse errors
   }
 
   return {
