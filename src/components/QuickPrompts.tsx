@@ -67,44 +67,29 @@ export const QuickPrompts: React.FC<QuickPromptsProps> = ({
     }
   };
 
-  const firstRow = prompts.slice(0, 3);
-  const secondRow = prompts.slice(3, 5);
-
   return (
-    <section aria-labelledby="quick-prompts-heading" className="w-full max-w-[740px] mx-auto mt-8">
+    <section
+      aria-labelledby="quick-prompts-heading"
+      className="w-full max-w-[680px] mx-auto mt-7"
+    >
       <h3
         id="quick-prompts-heading"
-        className="text-[14.5px] font-bold text-[#111827] dark:text-slate-100 text-center mb-4"
+        className="text-[13.5px] font-semibold text-[#4B5563] dark:text-slate-400 text-center mb-3.5"
       >
         Выберите быстрый запрос
       </h3>
 
-      {/* Top Row (3 items on desktop) */}
-      <div className="flex flex-wrap items-center justify-center gap-3">
-        {firstRow.map((qp) => (
+      {/* Symmetric Equal-Column Grid (2x3 on mobile/tablet, 3x2 on desktop — Report 2) */}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-[680px] mx-auto">
+        {prompts.map((qp) => (
           <button
             key={qp.id}
             type="button"
             onClick={() => onSelectQuickPrompt(qp)}
-            className="focus-ring group h-[44px] pl-2.5 pr-4 rounded-full border border-[#E5E7EB] dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 hover:shadow-xs flex items-center gap-2.5 text-[13.5px] font-medium text-[#111827] dark:text-slate-100 transition-all whitespace-nowrap"
+            className="focus-ring group h-[44px] w-full px-3 rounded-xl border border-[#E5E7EB] dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 hover:shadow-xs flex items-center gap-2.5 text-[13px] font-medium text-[#111827] dark:text-slate-100 transition-all text-left"
           >
             {renderIconBadge(qp.iconType)}
-            <span>{qp.label}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Bottom Row (2 items centered on desktop) */}
-      <div className="flex flex-wrap items-center justify-center gap-3 mt-3">
-        {secondRow.map((qp) => (
-          <button
-            key={qp.id}
-            type="button"
-            onClick={() => onSelectQuickPrompt(qp)}
-            className="focus-ring group h-[44px] pl-2.5 pr-4 rounded-full border border-[#E5E7EB] dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 hover:shadow-xs flex items-center gap-2.5 text-[13.5px] font-medium text-[#111827] dark:text-slate-100 transition-all whitespace-nowrap"
-          >
-            {renderIconBadge(qp.iconType)}
-            <span>{qp.label}</span>
+            <span className="truncate">{qp.label}</span>
           </button>
         ))}
       </div>

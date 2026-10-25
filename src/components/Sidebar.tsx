@@ -482,25 +482,74 @@ export const Sidebar: React.FC<SidebarProps> = ({
         )}
       </div>
 
-      {/* Pinned Bottom Section: Quotas + User Profile Footer (Report 3: flex-shrink-0 mt-auto) */}
+      {/* Pinned Bottom Section: Quotas + User Profile Footer (Report 3 & Report 4) */}
       <div className="mt-auto shrink-0 pt-2 bg-[#FAFAFC] dark:bg-[#111524]">
-        {/* Quota Usage Card */}
-        {!collapsed && quotas && (
-          <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white/90 dark:bg-[#151A2D] text-[11.5px] space-y-1">
-            <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
-              <span>Дневной лимит</span>
-              <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
-                {quotas.daily.used} / {quotas.daily.limit ?? '∞'}
-              </span>
+        {/* Quota Usage Card with Linear Progress Bars (Report 4) */}
+        {!collapsed && quotas && (() => {
+          const dailyLimit = quotas.daily.limit && quotas.daily.limit > 0 ? quotas.daily.limit : null;
+          const monthlyLimit = quotas.monthly.limit && quotas.monthly.limit > 0 ? quotas.monthly.limit : null;
+
+          const dailyPct = dailyLimit
+            ? Math.min(100, Math.round((quotas.daily.used / dailyLimit) * 100))
+            : 0;
+          const monthlyPct = monthlyLimit
+            ? Math.min(100, Math.round((quotas.monthly.used / monthlyLimit) * 100))
+            : 0;
+
+          const getBarColor = (pct: number) => {
+            if (pct >= 90) return 'bg-red-500 dark:bg-red-400';
+            if (pct >= 75) return 'bg-amber-500 dark:bg-amber-400';
+            return 'bg-[#4F46E5] dark:bg-indigo-400';
+          };
+
+          return (
+            <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white/90 dark:bg-[#151A2D] space-y-2">
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs font-medium text-[#4B5563] dark:text-slate-300">
+                  <span>Дневной лимит</span>
+                  <span className="tabular-nums text-[#1F2937] dark:text-slate-200">
+                    {quotas.daily.used} / {dailyLimit ?? '∞'}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Использование дневного лимита"
+                  aria-valuenow={quotas.daily.used}
+                  aria-valuemin={0}
+                  aria-valuemax={dailyLimit ?? 100}
+                  className="h-1.5 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
+                >
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${getBarColor(dailyPct)}`}
+                    style={{ width: `${dailyLimit ? dailyPct : 10}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <div className="flex items-center justify-between text-xs font-medium text-[#4B5563] dark:text-slate-300">
+                  <span>Месячный лимит</span>
+                  <span className="tabular-nums text-[#1F2937] dark:text-slate-200">
+                    {quotas.monthly.used} / {monthlyLimit ?? '∞'}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Использование месячного лимита"
+                  aria-valuenow={quotas.monthly.used}
+                  aria-valuemin={0}
+                  aria-valuemax={monthlyLimit ?? 100}
+                  className="h-1.5 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
+                >
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${getBarColor(monthlyPct)}`}
+                    style={{ width: `${monthlyLimit ? monthlyPct : 10}%` }}
+                  />
+                </div>
+              </div>
             </div>
-            <div className="flex items-center justify-between text-[#4B5563] dark:text-slate-300">
-              <span>Месячный лимит</span>
-              <span className="font-semibold tabular-nums text-[#111827] dark:text-slate-100">
-                {quotas.monthly.used} / {quotas.monthly.limit ?? '∞'}
-              </span>
-            </div>
-          </div>
-        )}
+          );
+        })()}
 
         {/* User Profile Footer */}
         <div className="relative pt-2.5 pb-3.5 px-4 border-t border-[#E6E8F0] dark:border-slate-800/90">

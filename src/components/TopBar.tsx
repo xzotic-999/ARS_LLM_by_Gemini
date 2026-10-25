@@ -24,12 +24,23 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenMobileMenu,
   exportSession,
 }) => {
-  const markdownHref = exportSession ? createChatMarkdownDataUri(exportSession) : undefined;
-  const markdownFilename = exportSession ? getChatMarkdownFilename(exportSession) : 'chat-export.md';
+  const canExport = Boolean(exportSession && exportSession.messages.length > 0);
   const isDark = theme === 'dark';
 
   const handleToggleTheme = () => {
     onSelectTheme(isDark ? 'light' : 'dark');
+  };
+
+  const handleExportMarkdown = () => {
+    if (!exportSession || exportSession.messages.length === 0) return;
+    const href = createChatMarkdownDataUri(exportSession);
+    const filename = getChatMarkdownFilename(exportSession);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   return (
@@ -49,9 +60,8 @@ export const TopBar: React.FC<TopBarProps> = ({
         </h1>
       </div>
 
-      {/* Right Zone: Interactive Theme Switch + Export Markdown Link + New Chat Primary CTA */}
+      {/* Right Zone: Interactive Theme Switch + Export Markdown Button + New Chat Primary CTA */}
       <div className="flex items-center gap-3 shrink-0">
-        {/* Report 7: Interactive Toggle Switch with clear active state and tooltip */}
         <button
           type="button"
           role="switch"
@@ -81,18 +91,29 @@ export const TopBar: React.FC<TopBarProps> = ({
           </span>
         </button>
 
-        {markdownHref && (
-          <a
-            href={markdownHref}
-            download={markdownFilename}
-            aria-label={`Экспорт чата в Markdown (${markdownFilename})`}
-            title={`Скачать ${markdownFilename}`}
-            className="focus-ring h-[38px] px-3.5 rounded-xl border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/80 hover:bg-slate-50 dark:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200 text-[13px] font-medium flex items-center gap-2 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Download className="w-4 h-4 text-[#4F46E5] dark:text-indigo-400 stroke-[2]" aria-hidden="true" />
-            <span className="hidden sm:inline">Экспорт .md</span>
-          </a>
-        )}
+        {/* Report 3: Disabled when messages.length === 0 or on empty New Chat screen */}
+        <button
+          type="button"
+          disabled={!canExport}
+          onClick={handleExportMarkdown}
+          aria-label={
+            canExport
+              ? `Экспорт чата в Markdown (${getChatMarkdownFilename(exportSession!)})`
+              : 'Экспорт чата в Markdown (недоступно в пустом чате)'
+          }
+          title={
+            canExport
+              ? `Скачать ${getChatMarkdownFilename(exportSession!)}`
+              : 'Экспорт доступен после отправки первого сообщения'
+          }
+          className="focus-ring h-[38px] px-3.5 rounded-xl border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-slate-800/80 enabled:hover:bg-slate-50 dark:enabled:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200 text-[13px] font-medium flex items-center gap-2 transition-all whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed"
+        >
+          <Download
+            className="w-4 h-4 text-[#4F46E5] dark:text-indigo-400 stroke-[2]"
+            aria-hidden="true"
+          />
+          <span className="hidden sm:inline">Экспорт .md</span>
+        </button>
 
         <button
           type="button"
