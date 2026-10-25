@@ -265,106 +265,127 @@ export const chatApi = {
     onError: (err: Error) => void,
     signal?: AbortSignal
   ): Promise<void> => {
-    try {
-      const res = await fetch(`${API_BASE}/chat/completions`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, stream: true }),
-        signal,
-      });
+    const maxClientAttempts = 2;
+    let lastError: Error | null = null;
 
-      const contentType = res.headers.get('content-type') || '';
-      if (contentType.includes('text/html')) {
-        throw new ApiError(
-          503,
-          'Серверный шлюз чата (/api/v1/chat/completions) вернул HTML вместо потока данных. Опубликуйте актуальную версию приложения (Publish) или проверьте работу VS Code Dev Tunnel.'
-        );
-      }
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        const message =
-          data?.error?.message ||
-          (res.status === 429
-            ? 'Превышен лимит запросов. Обратитесь к администратору.'
-            : res.status === 401
-              ? 'Сессия истекла. Пожалуйста, войдите снова.'
-              : `Ошибка генерации ответа (HTTP ${res.status})`);
-        throw new ApiError(res.status, message);
-      }
-
-      if (contentType.includes('application/json')) {
-        const data = await res.json().catch(() => null);
-        const fullText = data?.choices?.[0]?.message?.content;
-        if (typeof fullText === 'string' && fullText.trim().length > 0) {
-          onToken(fullText);
-          onDone();
-          return;
-        }
-        throw new Error(data?.error?.message || 'Сервер вернул пустой ответ.');
-      }
-
-      const reader = res.body?.getReader();
-      if (!reader) {
-        throw new Error('Поток ответа недоступен');
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let finished = false;
+    for (let attempt = 0; attempt < maxClientAttempts; attempt++) {
       let receivedAnyToken = false;
 
-      while (!finished) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      try {
+        // On second client attempt, allow non-streaming fallback if first stream attempt failed
+        const useStream = attempt === 0;
+        const res = await fetch(`${API_BASE}/chat/completions`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages, stream: useStream }),
+          signal,
+        });
 
-        buffer += decoder.decode(value, { stream: true });
-        const { events, remainingBuffer } = parseSseLines(buffer);
-        buffer = remainingBuffer;
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('text/html')) {
+          throw new ApiError(
+            503,
+            'Серверный шлюз чата (/api/v1/chat/completions) вернул HTML вместо потока данных. Опубликуйте актуальную версию приложения (Publish) или проверьте работу VS Code Dev Tunnel.'
+          );
+        }
 
-        for (const ev of events) {
-          if (ev.type === 'delta') {
+        if (!res.ok) {
+          const data = await res.json().catch(() => null);
+          const message =
+            data?.error?.message ||
+            (res.status === 429
+              ? 'Превышен лимит запросов. Обратитесь к администратору.'
+              : res.status === 401
+                ? 'Сессия истекла. Пожалуйста, войдите снова.'
+                : `Ошибка генерации ответа (HTTP ${res.status})`);
+          throw new ApiError(res.status, message);
+        }
+
+        if (contentType.includes('application/json')) {
+          const data = await res.json().catch(() => null);
+          const fullText = data?.choices?.[0]?.message?.content;
+          if (typeof fullText === 'string' && fullText.trim().length > 0) {
             receivedAnyToken = true;
-            onToken(ev.content);
-          } else if (ev.type === 'error') {
-            finished = true;
-            onError(new Error(ev.message));
-            return;
-          } else if (ev.type === 'done') {
-            finished = true;
-            if (!receivedAnyToken && !signal?.aborted) {
-              onError(
-                new Error(
-                  'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.'
-                )
-              );
-              return;
-            }
+            onToken(fullText);
             onDone();
             return;
           }
+          throw new Error(data?.error?.message || 'Сервер вернул пустой ответ.');
         }
-      }
 
-      if (!finished) {
-        if (!receivedAnyToken && !signal?.aborted) {
-          onError(
-            new Error(
-              'Не получен ответ от модели. Убедитесь, что FreeLLMAPI и VS Code Dev Tunnel активны.'
-            )
-          );
-          return;
+        const reader = res.body?.getReader();
+        if (!reader) {
+          throw new Error('Поток ответа недоступен');
         }
-        onDone();
-      }
-    } catch (err) {
-      if (signal?.aborted) {
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finished = false;
+        let streamErrorMsg: string | null = null;
+
+        while (!finished) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const { events, remainingBuffer } = parseSseLines(buffer);
+          buffer = remainingBuffer;
+
+          for (const ev of events) {
+            if (ev.type === 'delta') {
+              receivedAnyToken = true;
+              onToken(ev.content);
+            } else if (ev.type === 'error') {
+              finished = true;
+              streamErrorMsg = ev.message;
+              break;
+            } else if (ev.type === 'done') {
+              finished = true;
+              if (receivedAnyToken || signal?.aborted) {
+                onDone();
+                return;
+              }
+              streamErrorMsg =
+                'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.';
+              break;
+            }
+          }
+        }
+
+        if (streamErrorMsg) {
+          throw new Error(streamErrorMsg);
+        }
+
+        if (!receivedAnyToken && !signal?.aborted) {
+          throw new Error(
+            'Не получен ответ от модели. Убедитесь, что FreeLLMAPI и VS Code Dev Tunnel активны.'
+          );
+        }
+
         onDone();
         return;
+      } catch (err) {
+        if (signal?.aborted) {
+          onDone();
+          return;
+        }
+        lastError = err instanceof Error ? err : new Error(String(err));
+        // If we already emitted partial tokens or if it's an auth/429 error, don't retry
+        if (
+          receivedAnyToken ||
+          (err instanceof ApiError && (err.status === 401 || err.status === 429))
+        ) {
+          onError(lastError);
+          return;
+        }
       }
-      onError(err instanceof Error ? err : new Error(String(err)));
     }
+
+    onError(
+      lastError ??
+        new Error('Сервер генерации временно недоступен. Нажмите «Повторить запрос».')
+    );
   },
 };
 

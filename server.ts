@@ -28,6 +28,8 @@ interface OpenAiChatCompletionResponse {
     message?: {
       role?: string;
       content?: string | null;
+      reasoning?: string | null;
+      reasoning_content?: string | null;
     };
   }>;
   error?: {
@@ -39,6 +41,8 @@ interface OpenAiChatCompletionChunk {
   choices?: Array<{
     delta?: {
       content?: string | null;
+      reasoning?: string | null;
+      reasoning_content?: string | null;
     };
     finish_reason?: string | null;
   }>;
@@ -46,6 +50,9 @@ interface OpenAiChatCompletionChunk {
     message?: string;
   };
 }
+
+const PER_ATTEMPT_INITIAL_TIMEOUT_MS = 24_000;
+const PER_CHUNK_IDLE_TIMEOUT_MS = 25_000;
 
 function loadRuntimeConfig(): FreeLlmRuntimeConfig {
   dotenv.config({ path: path.resolve(__dirname, '.env'), override: true });
@@ -151,6 +158,7 @@ function normalizeV1BaseUrl(rawBaseUrl: string): string {
 function buildHeaders(apiKey: string, baseUrl: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
   };
   if (apiKey && apiKey.trim().length > 0) {
     headers['Authorization'] = `Bearer ${apiKey.trim()}`;
@@ -161,98 +169,138 @@ function buildHeaders(apiKey: string, baseUrl: string): Record<string, string> {
   return headers;
 }
 
-async function fetchWithFallback(
-  messages: ChatMessage[],
-  stream: boolean,
-  signal: AbortSignal,
-  cfg: FreeLlmRuntimeConfig
-): Promise<globalThis.Response> {
-  const primaryBase = normalizeV1BaseUrl(cfg.FREELLM_API_BASE_URL);
-  const primaryUrl = `${primaryBase}/chat/completions`;
+function isRetryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
 
-  try {
-    const res = await fetch(primaryUrl, {
-      method: 'POST',
-      headers: buildHeaders(cfg.FREELLM_API_KEY, primaryBase),
-      body: JSON.stringify({
-        model: cfg.FREELLM_MODEL || 'auto',
-        messages,
-        stream,
-      }),
-      signal,
-    });
+function readWithTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onTimeout();
+      reject(new Error(`Upstream read timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
 
-    const contentType = res.headers.get('content-type') || '';
-    if (res.ok && !contentType.includes('text/html')) {
-      return res;
-    }
-
-    if (!cfg.FREELLM_FALLBACK_BASE_URL) {
-      return res;
-    }
-  } catch (primaryErr) {
-    if (signal.aborted || !cfg.FREELLM_FALLBACK_BASE_URL) {
-      throw primaryErr;
-    }
-  }
-
-  const fallbackBase = normalizeV1BaseUrl(cfg.FREELLM_FALLBACK_BASE_URL);
-  const fallbackUrl = `${fallbackBase}/chat/completions`;
-  return fetch(fallbackUrl, {
-    method: 'POST',
-    headers: buildHeaders(
-      cfg.FREELLM_FALLBACK_API_KEY || cfg.FREELLM_API_KEY,
-      fallbackBase
-    ),
-    body: JSON.stringify({
-      model: cfg.FREELLM_FALLBACK_MODEL || cfg.FREELLM_MODEL || 'auto',
-      messages,
-      stream,
-    }),
-    signal,
+    promise.then(
+      (val) => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
   });
 }
 
-async function chatWithFreeLlm(
+async function singleUnaryCompletionAttempt(
   messages: ChatMessage[],
-  cfg: FreeLlmRuntimeConfig
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  timeoutMs: number,
+  callerSignal?: AbortSignal
 ): Promise<string> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), cfg.FREELLM_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => controller.abort();
+  callerSignal?.addEventListener('abort', onAbort, { once: true });
 
   try {
-    const response = await fetchWithFallback(
-      messages,
-      false,
-      controller.signal,
-      cfg
-    );
+    const normalizedBase = normalizeV1BaseUrl(baseUrl);
+    const response = await fetch(`${normalizedBase}/chat/completions`, {
+      method: 'POST',
+      headers: buildHeaders(apiKey, normalizedBase),
+      body: JSON.stringify({
+        model: model || 'auto',
+        messages,
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
 
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('text/html')) {
       throw new Error(
-        'FreeLLMAPI tunnel returned an HTML anti-phishing or gateway page instead of JSON. Ensure the VS Code Dev Tunnel is active and public.'
+        `Туннель FreeLLMAPI вернул HTML-страницу (HTTP ${response.status}). Убедитесь, что FreeLLMAPI и VS Code Dev Tunnel активны.`
       );
     }
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
       throw new Error(
-        `FreeLLMAPI returned HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 200)}` : ''}`
+        `FreeLLMAPI returned HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 160)}` : ''}`
       );
     }
 
     const data = (await response.json()) as OpenAiChatCompletionResponse;
-    const content = data.choices?.[0]?.message?.content;
+    const msg = data.choices?.[0]?.message;
+    const content = msg?.content?.trim() || msg?.reasoning_content?.trim() || msg?.reasoning?.trim() || '';
 
-    if (typeof content !== 'string' || !content.trim()) {
+    if (!content) {
       throw new Error('FreeLLMAPI returned an empty assistant response');
     }
 
     return content;
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
+    callerSignal?.removeEventListener('abort', onAbort);
   }
+}
+
+async function chatWithFreeLlm(
+  messages: ChatMessage[],
+  cfg: FreeLlmRuntimeConfig,
+  callerSignal?: AbortSignal
+): Promise<string> {
+  const attempts: Array<{ baseUrl: string; apiKey: string; model: string; timeoutMs: number }> = [
+    {
+      baseUrl: cfg.FREELLM_API_BASE_URL,
+      apiKey: cfg.FREELLM_API_KEY,
+      model: cfg.FREELLM_MODEL || 'auto',
+      timeoutMs: 28_000,
+    },
+    {
+      baseUrl: cfg.FREELLM_API_BASE_URL,
+      apiKey: cfg.FREELLM_API_KEY,
+      model: cfg.FREELLM_MODEL || 'auto',
+      timeoutMs: 35_000,
+    },
+  ];
+
+  if (cfg.FREELLM_FALLBACK_BASE_URL) {
+    attempts.push({
+      baseUrl: cfg.FREELLM_FALLBACK_BASE_URL,
+      apiKey: cfg.FREELLM_FALLBACK_API_KEY || cfg.FREELLM_API_KEY,
+      model: cfg.FREELLM_FALLBACK_MODEL || cfg.FREELLM_MODEL || 'auto',
+      timeoutMs: 35_000,
+    });
+  }
+
+  let lastError: Error | null = null;
+  for (const attempt of attempts) {
+    if (callerSignal?.aborted) {
+      throw new Error('Request aborted');
+    }
+    try {
+      return await singleUnaryCompletionAttempt(
+        messages,
+        attempt.baseUrl,
+        attempt.apiKey,
+        attempt.model,
+        attempt.timeoutMs,
+        callerSignal
+      );
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+
+  throw lastError ?? new Error('FreeLLMAPI request failed');
 }
 
 async function* streamChatWithFreeLlm(
@@ -260,94 +308,211 @@ async function* streamChatWithFreeLlm(
   callerSignal: AbortSignal | undefined,
   cfg: FreeLlmRuntimeConfig
 ): AsyncGenerator<string, void, unknown> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), cfg.FREELLM_TIMEOUT_MS);
+  const streamAttempts: Array<{
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    initialTimeoutMs: number;
+  }> = [
+    {
+      baseUrl: cfg.FREELLM_API_BASE_URL,
+      apiKey: cfg.FREELLM_API_KEY,
+      model: cfg.FREELLM_MODEL || 'auto',
+      initialTimeoutMs: PER_ATTEMPT_INITIAL_TIMEOUT_MS,
+    },
+    {
+      baseUrl: cfg.FREELLM_API_BASE_URL,
+      apiKey: cfg.FREELLM_API_KEY,
+      model: cfg.FREELLM_MODEL || 'auto',
+      initialTimeoutMs: PER_ATTEMPT_INITIAL_TIMEOUT_MS,
+    },
+  ];
 
-  const onCallerAbort = () => controller.abort();
-  if (callerSignal) {
-    if (callerSignal.aborted) {
-      clearTimeout(timeout);
-      return;
-    }
-    callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+  if (cfg.FREELLM_FALLBACK_BASE_URL) {
+    streamAttempts.push({
+      baseUrl: cfg.FREELLM_FALLBACK_BASE_URL,
+      apiKey: cfg.FREELLM_FALLBACK_API_KEY || cfg.FREELLM_API_KEY,
+      model: cfg.FREELLM_FALLBACK_MODEL || cfg.FREELLM_MODEL || 'auto',
+      initialTimeoutMs: PER_ATTEMPT_INITIAL_TIMEOUT_MS,
+    });
   }
 
-  try {
-    const response = await fetchWithFallback(
-      messages,
-      true,
-      controller.signal,
-      cfg
-    );
+  let totalYieldedTokens = 0;
+  let lastError: Error | null = null;
 
-    const contentType = response.headers.get('content-type') || '';
-    if (contentType.includes('text/html')) {
-      throw new Error(
-        'Туннель FreeLLMAPI вернул HTML-страницу вместо потока данных. Проверьте, что FreeLLMAPI и VS Code Dev Tunnel запущены на вашем компьютере.'
-      );
-    }
+  for (let attemptIdx = 0; attemptIdx < streamAttempts.length; attemptIdx++) {
+    if (callerSignal?.aborted) return;
 
-    if (!response.ok || !response.body) {
-      const errBody = await response.text().catch(() => '');
-      throw new Error(
-        `FreeLLMAPI stream returned HTTP ${response.status}${errBody ? `: ${errBody.slice(0, 200)}` : ''}`
-      );
-    }
+    const attempt = streamAttempts[attemptIdx];
+    const controller = new AbortController();
+    const initialTimer = setTimeout(() => controller.abort(), attempt.initialTimeoutMs);
 
-    if (contentType.includes('application/json')) {
-      const data = (await response.json()) as OpenAiChatCompletionResponse;
-      const fullContent = data.choices?.[0]?.message?.content;
-      if (typeof fullContent === 'string' && fullContent.length > 0) {
-        yield fullContent;
-        return;
+    const onCallerAbort = () => controller.abort();
+    callerSignal?.addEventListener('abort', onCallerAbort, { once: true });
+
+    let reasoningFallbackBuffer = '';
+
+    try {
+      const normalizedBase = normalizeV1BaseUrl(attempt.baseUrl);
+      const response = await fetch(`${normalizedBase}/chat/completions`, {
+        method: 'POST',
+        headers: buildHeaders(attempt.apiKey, normalizedBase),
+        body: JSON.stringify({
+          model: attempt.model,
+          messages,
+          stream: true,
+        }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(initialTimer);
+
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('text/html')) {
+        throw new Error(
+          `Туннель FreeLLMAPI вернул HTML-страницу (HTTP ${response.status}). Проверьте, что FreeLLMAPI и VS Code Dev Tunnel запущены.`
+        );
       }
-      throw new Error('FreeLLMAPI returned empty JSON response');
-    }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line || !line.startsWith('data:')) continue;
-
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') {
-          return;
-        }
-
-        let parsed: OpenAiChatCompletionChunk | null = null;
-        try {
-          parsed = JSON.parse(payload) as OpenAiChatCompletionChunk;
-        } catch {
+      if (!response.ok || !response.body) {
+        const status = response.status;
+        const errBody = await response.text().catch(() => '');
+        const statusErr = new Error(
+          `FreeLLMAPI stream returned HTTP ${status}${errBody ? `: ${errBody.slice(0, 140)}` : ''}`
+        );
+        if (isRetryableHttpStatus(status) && totalYieldedTokens === 0) {
+          lastError = statusErr;
           continue;
         }
-
-        if (parsed?.error?.message) {
-          throw new Error(parsed.error.message);
-        }
-
-        const delta = parsed?.choices?.[0]?.delta?.content;
-        if (typeof delta === 'string' && delta.length > 0) {
-          yield delta;
-        }
+        throw statusErr;
       }
-    }
-  } finally {
-    clearTimeout(timeout);
-    if (callerSignal) {
-      callerSignal.removeEventListener('abort', onCallerAbort);
+
+      if (contentType.includes('application/json')) {
+        const data = (await response.json()) as OpenAiChatCompletionResponse;
+        const msg = data.choices?.[0]?.message;
+        const fullContent =
+          msg?.content?.trim() || msg?.reasoning_content?.trim() || msg?.reasoning?.trim() || '';
+        if (fullContent.length > 0) {
+          totalYieldedTokens++;
+          yield fullContent;
+          return;
+        }
+        throw new Error('FreeLLMAPI returned empty JSON response');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+
+      try {
+        while (true) {
+          if (callerSignal?.aborted) return;
+
+          const { done, value } = await readWithTimeout(
+            reader.read(),
+            PER_CHUNK_IDLE_TIMEOUT_MS,
+            () => controller.abort()
+          );
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
+
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line || !line.startsWith('data:')) continue;
+
+            const payload = line.slice(5).trim();
+            if (payload === '[DONE]') {
+              if (totalYieldedTokens > 0) {
+                return;
+              }
+              if (reasoningFallbackBuffer.trim().length > 0) {
+                totalYieldedTokens++;
+                yield reasoningFallbackBuffer.trim();
+                return;
+              }
+              break;
+            }
+
+            let parsed: OpenAiChatCompletionChunk | null = null;
+            try {
+              parsed = JSON.parse(payload) as OpenAiChatCompletionChunk;
+            } catch {
+              continue;
+            }
+
+            if (parsed?.error?.message) {
+              throw new Error(parsed.error.message);
+            }
+
+            const deltaObj = parsed?.choices?.[0]?.delta;
+            const deltaContent = deltaObj?.content;
+            if (typeof deltaContent === 'string' && deltaContent.length > 0) {
+              totalYieldedTokens++;
+              yield deltaContent;
+            } else {
+              const reasoningToken = deltaObj?.reasoning ?? deltaObj?.reasoning_content;
+              if (typeof reasoningToken === 'string' && reasoningToken.length > 0) {
+                reasoningFallbackBuffer += reasoningToken;
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      if (totalYieldedTokens > 0) {
+        return;
+      }
+
+      if (reasoningFallbackBuffer.trim().length > 0) {
+        totalYieldedTokens++;
+        yield reasoningFallbackBuffer.trim();
+        return;
+      }
+
+      lastError = new Error('FreeLLMAPI stream ended without content tokens');
+    } catch (err) {
+      if (callerSignal?.aborted) return;
+      if (totalYieldedTokens > 0) {
+        // Already streamed partial reply to user; finish cleanly instead of failing whole message
+        return;
+      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+    } finally {
+      clearTimeout(initialTimer);
+      callerSignal?.removeEventListener('abort', onCallerAbort);
     }
   }
+
+  // Final Fallback Attempt: non-streaming request (stream: false), which lets FreeLLMAPI's
+  // internal provider failover select a healthy model and return full JSON
+  if (!callerSignal?.aborted && totalYieldedTokens === 0) {
+    try {
+      const unaryReply = await singleUnaryCompletionAttempt(
+        messages,
+        cfg.FREELLM_API_BASE_URL,
+        cfg.FREELLM_API_KEY,
+        cfg.FREELLM_MODEL || 'auto',
+        32_000,
+        callerSignal
+      );
+      if (unaryReply.trim().length > 0) {
+        yield unaryReply;
+        return;
+      }
+    } catch (unaryErr) {
+      lastError = unaryErr instanceof Error ? unaryErr : lastError;
+    }
+  }
+
+  throw (
+    lastError ??
+    new Error('Сервер FreeLLMAPI временно перегружен (HTTP 504). Пожалуйста, нажмите «Повторить запрос».')
+  );
 }
 
 async function startServer() {
@@ -434,6 +599,13 @@ async function startServer() {
         }
       });
 
+      // Send SSE comment heartbeat every 5s so Cloud Run / proxies never drop the stream during model thinking or retry
+      const heartbeatInterval = setInterval(() => {
+        if (!res.writableEnded && !abortController.signal.aborted) {
+          res.write(': keep-alive\n\n');
+        }
+      }, 5_000);
+
       try {
         for await (const token of streamChatWithFreeLlm(
           trustedMessages,
@@ -483,6 +655,7 @@ async function startServer() {
           );
         }
       } finally {
+        clearInterval(heartbeatInterval);
         if (!res.writableEnded) {
           res.end();
         }
