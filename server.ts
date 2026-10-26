@@ -5,13 +5,88 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  evaluateMessagesSecurityGuardrail,
-  isSecurityRestrictedOutput,
-  SECURITY_REFUSAL_MESSAGE,
-} from './backend/src/services/instruction.js';
+  sanitizeMessagesUntrustedAttachments,
+  extractAndValidateAttachmentNode,
+  MAX_ATTACHMENT_FILE_BYTES,
+} from './backend/src/services/attachmentExtractor.ts';
+import {
+  fetchWeatherData,
+  fetchExchangeRatesData,
+  resolveAndEnrichMessagesWithExternalTools,
+} from './backend/src/services/externalTools.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+export const SECURITY_REFUSAL_MESSAGE =
+  'В соответствии с политикой информационной безопасности ARS LLM я не обсуждаю уязвимости, векторы и типы атак, методы обхода защитных механизмов или способы компрометации ИИ-систем и инфраструктуры — в том числе в теоретическом или ознакомительном формате.\n\nЯ готов помочь вам с решением прикладных рабочих задач: разработкой и оптимизацией кода, анализом рабочей документации, подготовкой отчётов и планированием проектов.';
+
+const RESTRICTED_PROMPT_PATTERNS: RegExp[] = [
+  /(?:атак[а-яa-z]*|уязвимост[а-яa-z]*|взлом[а-яa-z]*|скомпрометир[а-яa-z]*|компрометац[а-яa-z]*|обойти|обход[а-яa-z]*|сломать|хакнуть)[\s\S]{0,80}(?:ars[\s_-]*llm|арс[\s_-]*ллм|ии[\s-]*систем|llm|языков[а-я]+\s+модел|нейросет|ассистент|бот|чат)/i,
+  /(?:ars[\s_-]*llm|арс[\s_-]*ллм|ии[\s-]*систем[а-яa-z]*|llm|языков[а-я]+\s+модел[а-яa-z]*|нейросет[а-яa-z]*)[\s\S]{0,80}(?:подвержен[а-яa-z]*\s+атак|уязвимост|атак[а-яa-z]*|взлом[а-яa-z]*|обойти|обход|компрометац)/i,
+  /(?:типы|виды|категории|categories|классификаци[а-я]+|векторы|методы|способы)\s+(?:атак|уязвимост|взлома)/i,
+  /(?:атак[а-яa-z]+\s+на\s+модел|model\s+attacks|атак[а-яa-z]+\s+на\s+инфраструктур|infrastructure\s+attacks|атак[а-яa-z]+\s+на\s+параметры|model\s+parameter\s+attacks|атак[а-яa-z]+\s+на\s+цепочку\s+рассуждений)/i,
+  /\b(?:prompt\s*injection|indirect\s*prompt\s*injection|adversarial\s*examples?|model\s*inversion|membership\s*inference|data\s*poisoning|jailbreak|джейлбрейк)\b/i,
+  /(?:промпт[\s-]*инъекц|инъекци[а-я]+\s+промпт|инъекци[а-я]+\s+инструкц|косвенн[а-я]+\s+инъекц|прям[а-я]+\s+инъекц|состязательн[а-я]+\s+пример|состязательн[а-я]+\s+атак|отравлени[а-я]+\s+данных)/i,
+  /(?:как\s+обойти|способ[а-я]*\s+обойти|обход[а-я]*)\s+(?:квот[а-я]*|лимит[а-я]*|ограничени[а-я]*|защит[а-я]*|фильтр[а-я]*|инструкци[а-я]*|правил[а-я]*|rate\s*limit)/i,
+  /(?:игнорируй|забудь|отмени|пренебреги)[\s\S]{0,40}(?:предыдущ[а-я]+|системн[а-я]+|все)\s+(?:инструкци[а-я]+|правил[а-я]+|указани[а-я]+)/i,
+  /\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|system)\s+(?:instructions|prompts|rules)\b/i,
+  /(?:покажи|выведи|раскрой|напиши|повтори|цитируй)[\s\S]{0,40}(?:системн[а-я]+\s+промпт|системн[а-я]+\s+инструкци|instruction\.md)/i,
+  /\b(?:show|reveal|print|repeat|dump)\s+(?:your\s+)?(?:system\s+prompt|system\s+instructions|initial\s+instructions)\b/i,
+];
+
+const RESTRICTED_OUTPUT_PATTERNS: RegExp[] = [
+  /может\s+быть\s+подвержен[а-я]*\s+различным\s+типам\s+атак/i,
+  /(?:categories|категории)\s+уязвимостей\s+и\s+методов/i,
+  /(?:атаки\s+на\s+модель|model\s+attacks)/i,
+  /(?:атаки\s+с\s+подменой\s+входных\s+данных|adversarial\s+examples)/i,
+  /(?:атаки\s+на\s+цепочку\s+рассуждений|prompt\s+injection)/i,
+  /(?:атаки\s+на\s+параметры\s+модели|model\s+parameter\s+attacks)/i,
+  /(?:model\s+inversion|membership\s+inference)/i,
+  /(?:атаки\s+на\s+pipeline\s+данных|data\s+pipeline\s+attacks)/i,
+  /(?:атаки\s+на\s+систему\s+хранения|storage\s+attacks)/i,
+  /(?:прям(?:ая|ой)\s+инъекция|косвенная\s+инъекция)[\s\S]{0,120}(?:запрос|команд|модел)/i,
+  /做出错误的/,
+];
+
+function isSecurityRestrictedPrompt(text: string): boolean {
+  if (!text || typeof text !== 'string') return false;
+  const normalized = text.trim();
+  if (!normalized) return false;
+  return RESTRICTED_PROMPT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function isSecurityRestrictedOutput(outputText: string): boolean {
+  if (!outputText || typeof outputText !== 'string') return false;
+  const normalized = outputText.trim();
+  if (!normalized) return false;
+  return RESTRICTED_OUTPUT_PATTERNS.some((pattern) => pattern.test(normalized));
+}
+
+function stripUntrustedAttachmentBlocksForGuardrail(text: string): string {
+  return text
+    .replace(/<untrusted_file_content\b[^>]*>[\s\S]*?<\/untrusted_file_content>/gi, ' ')
+    .replace(/---\s*Содержимое файла\s+"[^"]+"\s*---[\s\S]*?---\s*Конец файла\s+"[^"]+"\s*---/g, ' ')
+    .trim();
+}
+
+function evaluateMessagesSecurityGuardrail(
+  messages: ChatMessage[]
+): { blocked: true; refusalMessage: string } | { blocked: false } {
+  const userMessages = messages.filter((m) => m.role === 'user');
+  if (userMessages.length === 0) {
+    return { blocked: false };
+  }
+  const latestUserMessage = userMessages[userMessages.length - 1];
+  const userDirectPrompt = stripUntrustedAttachmentBlocksForGuardrail(latestUserMessage.content);
+  if (isSecurityRestrictedPrompt(userDirectPrompt)) {
+    return {
+      blocked: true,
+      refusalMessage: SECURITY_REFUSAL_MESSAGE,
+    };
+  }
+  return { blocked: false };
+}
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -134,7 +209,9 @@ function buildTrustedMessages(
   corporateInstruction: string,
   clientMessages: ChatMessage[]
 ): ChatMessage[] {
-  const nonSystemMessages = clientMessages.filter((m) => m.role !== 'system');
+  const nonSystemMessages = sanitizeMessagesUntrustedAttachments(
+    clientMessages.filter((m) => m.role !== 'system')
+  );
   if (!corporateInstruction.trim()) {
     return nonSystemMessages;
   }
@@ -631,7 +708,7 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
 
-  app.use(express.json({ limit: '4mb' }));
+  app.use(express.json({ limit: '15mb' }));
 
   app.get('/api/v1/health', (_req: Request, res: Response) => {
     const cfg = loadRuntimeConfig();
@@ -1263,8 +1340,72 @@ async function startServer() {
       return;
     }
 
+    const toolEnrichment = await resolveAndEnrichMessagesWithExternalTools(validMessages);
+
+    if (
+      toolEnrichment.allRequestedToolsFailed &&
+      toolEnrichment.deterministicErrorReply
+    ) {
+      releasePreviewReservation();
+      const fallbackText = toolEnrichment.deterministicErrorReply;
+      if (stream) {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+        res.write(
+          `data: ${JSON.stringify({
+            id: completionId,
+            object: 'chat.completion.chunk',
+            created,
+            choices: [
+              {
+                index: 0,
+                delta: { content: fallbackText },
+                finish_reason: null,
+              },
+            ],
+          })}\n\n`
+        );
+        res.write(
+          `data: ${JSON.stringify({
+            id: completionId,
+            object: 'chat.completion.chunk',
+            created,
+            choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          })}\n\n`
+        );
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      res.status(200).json({
+        id: completionId,
+        object: 'chat.completion',
+        created,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: fallbackText,
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        quotas: sessionUser?.quotas,
+      });
+      return;
+    }
+
     const corporateInstruction = getCorporateInstruction();
-    const trustedMessages = buildTrustedMessages(corporateInstruction, validMessages);
+    const trustedMessages = buildTrustedMessages(
+      corporateInstruction,
+      toolEnrichment.messages
+    );
     const runtimeConfig = loadRuntimeConfig();
 
     if (stream) {
@@ -1460,6 +1601,84 @@ async function startServer() {
     } finally {
       releasePreviewReservation();
     }
+  });
+
+  // --- External Tools & Attachment Extraction API (/api/v1/tools/*) ---
+  app.get('/api/v1/tools/weather', async (req: Request, res: Response) => {
+    const rawCity =
+      typeof req.query.city === 'string' && req.query.city.trim()
+        ? req.query.city.trim()
+        : 'Алматы';
+    const result = await fetchWeatherData(rawCity);
+    res.status(result.available ? 200 : 503).json(result);
+  });
+
+  app.get('/api/v1/tools/rates', async (req: Request, res: Response) => {
+    const baseCurrency =
+      typeof req.query.base === 'string' && req.query.base.trim()
+        ? req.query.base.trim().toUpperCase()
+        : 'USD';
+    const targetCurrencies =
+      typeof req.query.symbols === 'string' && req.query.symbols.trim()
+        ? req.query.symbols
+            .split(',')
+            .map((s) => s.trim().toUpperCase())
+            .filter(Boolean)
+        : ['KZT', 'EUR', 'RUB', 'CNY', 'GBP'];
+    const rawAmount = Number(req.query.amount ?? 1);
+    const amount = Number.isFinite(rawAmount) && rawAmount > 0 ? rawAmount : 1;
+
+    const result = await fetchExchangeRatesData({
+      baseCurrency,
+      targetCurrencies,
+      amount,
+    });
+    res.status(result.available ? 200 : 503).json(result);
+  });
+
+  app.post('/api/v1/tools/attachments/extract', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const mimeType =
+      typeof body.mimeType === 'string'
+        ? body.mimeType.trim()
+        : 'application/octet-stream';
+    const contentBase64 =
+      typeof body.contentBase64 === 'string' ? body.contentBase64.trim() : '';
+
+    if (!name) {
+      res.status(400).json({
+        error: { code: 'VALIDATION_ERROR', message: 'Не указано имя файла вложения.' },
+      });
+      return;
+    }
+
+    let bytes: Uint8Array;
+    try {
+      bytes = Buffer.from(contentBase64, 'base64');
+    } catch {
+      res.status(400).json({
+        error: { code: 'VALIDATION_ERROR', message: 'Некорректное кодирование файла (Base64).' },
+      });
+      return;
+    }
+
+    if (bytes.byteLength > MAX_ATTACHMENT_FILE_BYTES) {
+      res.status(413).json({
+        error: {
+          code: 'PAYLOAD_TOO_LARGE',
+          message: 'Размер файла превышает допустимый лимит 10 МБ.',
+        },
+      });
+      return;
+    }
+
+    const extracted = extractAndValidateAttachmentNode({
+      name,
+      mimeType,
+      bytes,
+    });
+    res.status(200).json(extracted);
   });
 
   // Return JSON 404 for unmounted /api/* endpoints so they never return index.html

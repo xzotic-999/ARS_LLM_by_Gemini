@@ -9,7 +9,11 @@ import {
   X,
   AlertCircle,
 } from 'lucide-react';
-import { AttachedFileItem, extractAttachmentText } from '../utils/fileExtractor';
+import {
+  AttachedFileItem,
+  extractAttachmentText,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from '../utils/fileExtractor';
 import type { QuotaBlockStatus } from '../utils/dashboardLogic';
 
 interface ChatComposerProps {
@@ -115,8 +119,36 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
     if (!files || files.length === 0) return;
     const fileList: File[] = Array.from(files);
     e.target.value = '';
+
+    if (attachments.length + fileList.length > MAX_ATTACHMENTS_PER_MESSAGE) {
+      setComposerError(
+        `Можно прикрепить не более ${MAX_ATTACHMENTS_PER_MESSAGE} файлов к одному сообщению.`
+      );
+      setActionsPopoverOpen(false);
+      return;
+    }
+
     const extracted = await Promise.all(fileList.map((f) => extractAttachmentText(f)));
-    setAttachments((prev) => [...prev, ...extracted]);
+    const validItems: AttachedFileItem[] = [];
+    const errors: string[] = [];
+
+    for (const item of extracted) {
+      if (item.error || item.modelCompatible === false) {
+        errors.push(`${item.name}: ${item.error || 'файл не поддерживается'}`);
+      } else {
+        validItems.push(item);
+      }
+    }
+
+    if (errors.length > 0) {
+      setComposerError(errors.join(' '));
+    } else {
+      setComposerError(null);
+    }
+
+    if (validItems.length > 0) {
+      setAttachments((prev) => [...prev, ...validItems].slice(0, MAX_ATTACHMENTS_PER_MESSAGE));
+    }
     setActionsPopoverOpen(false);
   };
 
@@ -177,24 +209,49 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       )}
       {/* Attached Files Chips (only visible when files are attached, no extra inner box border) */}
       {attachments.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 pb-2 px-1">
-          {attachments.map((file, idx) => (
-            <span
-              key={`${file.name}-${idx}`}
-              className="inline-flex items-center gap-1.5 text-[12px] font-medium text-[#1E293B] dark:text-slate-200 bg-[#F1F5F9] dark:bg-slate-800 px-2.5 py-1 rounded-lg"
-            >
-              <Paperclip className="w-3 h-3 text-[#4F46E5] dark:text-indigo-400" aria-hidden="true" />
-              <span className="truncate max-w-[200px]">{file.name}</span>
-              <button
-                type="button"
-                onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-                aria-label={`Удалить вложение ${file.name}`}
-                className="focus-ring text-[#64748B] hover:text-[#0F172A] dark:hover:text-white rounded"
+        <div className="flex flex-col gap-1.5 pb-2 px-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {attachments.map((file, idx) => (
+              <span
+                key={`${file.name}-${idx}`}
+                title={file.warning || `Файл готов к анализу (${file.name})`}
+                className={`inline-flex items-center gap-1.5 text-[12px] font-medium px-2.5 py-1 rounded-lg ${
+                  file.status === 'image_metadata_only' || file.injectionDetected
+                    ? 'text-amber-900 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/50 border border-amber-200/80 dark:border-amber-800/60'
+                    : 'text-[#1E293B] dark:text-slate-200 bg-[#F1F5F9] dark:bg-slate-800'
+                }`}
               >
-                <X className="w-3 h-3" />
-              </button>
-            </span>
-          ))}
+                <Paperclip className="w-3 h-3 text-[#4F46E5] dark:text-indigo-400" aria-hidden="true" />
+                <span className="truncate max-w-[200px]">{file.name}</span>
+                {file.status === 'image_metadata_only' && (
+                  <span className="text-[10.5px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300">
+                    Только метаданные (без Vision)
+                  </span>
+                )}
+                {file.injectionDetected && (
+                  <span className="text-[10.5px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/60 text-amber-800 dark:text-amber-300">
+                    Очищено ИБ
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                  aria-label={`Удалить вложение ${file.name}`}
+                  className="focus-ring text-[#64748B] hover:text-[#0F172A] dark:hover:text-white rounded"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+          {attachments.some((a) => a.warning) && (
+            <div
+              data-testid="attachment-warning-banner"
+              className="text-[11.5px] text-amber-700 dark:text-amber-300 px-1"
+            >
+              {attachments.find((a) => a.warning)?.warning}
+            </div>
+          )}
         </div>
       )}
 

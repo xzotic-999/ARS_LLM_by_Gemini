@@ -153,7 +153,7 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
   };
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col h-full w-full overflow-hidden pt-3 pb-3">
+    <div className="flex flex-col flex-1 min-h-0 h-full w-full overflow-hidden pt-3 pb-3">
       {/* Compact Single-Line Context Bar (no duplicate title; title is in TopBar) */}
       <div className="shrink-0 max-w-[960px] mx-auto w-full px-4 md:px-6">
         <div className="flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-[#E6E8F0] dark:border-slate-800">
@@ -210,7 +210,7 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
         role="log"
         aria-label="История сообщений чата"
         aria-live="polite"
-        className="flex-1 min-h-0 w-full overflow-y-auto pb-3"
+        className="flex-1 overflow-y-auto min-h-0 w-full pb-3"
       >
         <div className="max-w-[960px] mx-auto w-full px-4 md:px-6 space-y-3.5">
         {session.messages.length === 0 ? (

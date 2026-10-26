@@ -75,6 +75,14 @@ export interface Env {
   ADMIN_BOOTSTRAP_PASSWORD: string;
   ADMIN_BOOTSTRAP_NAME: string;
   DB_URL: string;
+  WEATHER_API_BASE_URL: string;
+  WEATHER_GEOCODING_BASE_URL: string;
+  OPEN_METEO_API_KEY: string;
+  EXCHANGE_RATE_API_BASE_URL: string;
+  EXCHANGE_RATE_FALLBACK_BASE_URL: string;
+  EXCHANGE_RATE_API_KEY: string;
+  EXTERNAL_TOOLS_TIMEOUT_MS: number;
+  EXTERNAL_TOOLS_CACHE_TTL_MS: number;
 }
 
 const INSECURE_PASSWORD_BLACKLIST = new Set([
@@ -360,6 +368,26 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     ADMIN_BOOTSTRAP_NAME:
       stripSurroundingQuotes(rawEnv.ADMIN_BOOTSTRAP_NAME) || "Administrator",
     DB_URL: dbUrl,
+    WEATHER_API_BASE_URL:
+      stripSurroundingQuotes(rawEnv.WEATHER_API_BASE_URL) ||
+      "https://api.open-meteo.com/v1",
+    WEATHER_GEOCODING_BASE_URL:
+      stripSurroundingQuotes(rawEnv.WEATHER_GEOCODING_BASE_URL) ||
+      "https://geocoding-api.open-meteo.com/v1",
+    OPEN_METEO_API_KEY: stripSurroundingQuotes(rawEnv.OPEN_METEO_API_KEY),
+    EXCHANGE_RATE_API_BASE_URL:
+      stripSurroundingQuotes(rawEnv.EXCHANGE_RATE_API_BASE_URL) ||
+      "https://open.er-api.com/v6/latest",
+    EXCHANGE_RATE_FALLBACK_BASE_URL:
+      stripSurroundingQuotes(rawEnv.EXCHANGE_RATE_FALLBACK_BASE_URL) ||
+      "https://api.frankfurter.dev/v1/latest",
+    EXCHANGE_RATE_API_KEY: stripSurroundingQuotes(rawEnv.EXCHANGE_RATE_API_KEY),
+    EXTERNAL_TOOLS_TIMEOUT_MS: Number(
+      stripSurroundingQuotes(rawEnv.EXTERNAL_TOOLS_TIMEOUT_MS) || 6000
+    ),
+    EXTERNAL_TOOLS_CACHE_TTL_MS: Number(
+      stripSurroundingQuotes(rawEnv.EXTERNAL_TOOLS_CACHE_TTL_MS) || 600000
+    ),
   };
 }
 

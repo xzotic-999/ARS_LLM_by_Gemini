@@ -56,32 +56,12 @@ import {
   QuotaLimits,
   UserProfile,
 } from './services/api';
-import type { AttachedFileItem } from './utils/fileExtractor';
+import {
+  AttachedFileItem,
+  buildPromptWithUntrustedAttachments,
+} from './utils/fileExtractor';
 
-function buildPromptWithAttachments(
-  trimmedPrompt: string,
-  attachments: string[],
-  attachmentDetails?: AttachedFileItem[]
-): string {
-  if (!attachments || attachments.length === 0) return trimmedPrompt;
-
-  const sections: string[] = [];
-  if (attachmentDetails && attachmentDetails.length > 0) {
-    for (const item of attachmentDetails) {
-      if (item.extractedText && item.extractedText.trim()) {
-        sections.push(
-          `--- Содержимое файла "${item.name}" ---\n${item.extractedText.trim()}\n--- Конец файла "${item.name}" ---`
-        );
-      } else {
-        sections.push(`[Прикрепленный файл: ${item.name}]`);
-      }
-    }
-  } else {
-    sections.push(`[Прикрепленные файлы: ${attachments.join(', ')}]`);
-  }
-
-  return `${trimmedPrompt}\n\n${sections.join('\n\n')}`;
-}
+const buildPromptWithAttachments = buildPromptWithUntrustedAttachments;
 
 const DEMO_EMPLOYEE_USER: UserProfile = {
   id: 2,
@@ -994,7 +974,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen overflow-hidden w-full bg-white dark:bg-[#0E1322] text-[#0F172A] dark:text-slate-100 flex flex-col">
+    <div className="flex flex-col h-screen overflow-hidden w-full bg-white dark:bg-[#0E1322] text-[#0F172A] dark:text-slate-100">
       {/* WCAG Skip Link for Keyboard Users */}
       <a
         href="#main-workspace"
@@ -1046,7 +1026,7 @@ export default function App() {
         />
 
         {/* Right Main Content Area */}
-        <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden bg-white dark:bg-[#0E1322]">
+        <div className="flex-1 flex flex-col h-screen min-w-0 min-h-0 overflow-hidden bg-white dark:bg-[#0E1322]">
           <TopBar
             title={topBarTitle}
             theme={theme}

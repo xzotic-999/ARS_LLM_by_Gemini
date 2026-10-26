@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { sanitizeMessagesUntrustedAttachments } from "./attachmentExtractor.js";
 
 let cachedInstruction: string | null = null;
 
@@ -68,8 +69,20 @@ export function isSecurityRestrictedOutput(outputText: string): boolean {
 }
 
 /**
+ * Strips `<untrusted_file_content>` envelopes before checking whether the user's own prompt
+ * is requesting prohibited attack instructions. Untrusted file content is sanitized separately
+ * by `sanitizeMessagesUntrustedAttachments`.
+ */
+function stripUntrustedAttachmentBlocksForGuardrail(text: string): string {
+  return text
+    .replace(/<untrusted_file_content\b[^>]*>[\s\S]*?<\/untrusted_file_content>/gi, " ")
+    .replace(/---\s*Содержимое файла\s+"[^"]+"\s*---[\s\S]*?---\s*Конец файла\s+"[^"]+"\s*---/g, " ")
+    .trim();
+}
+
+/**
  * Evaluates a conversation history before sending to the LLM.
- * Inspects the latest user message (and any prior user turns that attempt prompt injection).
+ * Inspects the latest user message (outside untrusted file envelopes) for restricted attack prompts.
  */
 export function evaluateMessagesSecurityGuardrail(
   messages: ChatMessage[]
@@ -80,7 +93,10 @@ export function evaluateMessagesSecurityGuardrail(
   }
 
   const latestUserMessage = userMessages[userMessages.length - 1];
-  if (isSecurityRestrictedPrompt(latestUserMessage.content)) {
+  const userDirectPrompt = stripUntrustedAttachmentBlocksForGuardrail(
+    latestUserMessage.content
+  );
+  if (isSecurityRestrictedPrompt(userDirectPrompt)) {
     return {
       blocked: true,
       refusalMessage: SECURITY_REFUSAL_MESSAGE,
@@ -268,6 +284,7 @@ export function loadInstruction(): string {
  *
  * - Removes any client-supplied `role: "system"` messages (they are not
  *   trusted — the corporate instruction is the only system message).
+ * - Sanitizes any `<untrusted_file_content>` or attachment blocks against prompt injection.
  * - Prepends the mandatory corporate instruction as the first system message.
  * - Preserves user/assistant history in order.
  */
@@ -275,7 +292,9 @@ export function buildTrustedMessages(
   instruction: string,
   clientMessages: ChatMessage[]
 ): ChatMessage[] {
-  const filtered = clientMessages.filter((m) => m.role !== "system");
+  const filtered = sanitizeMessagesUntrustedAttachments(
+    clientMessages.filter((m) => m.role !== "system")
+  );
   return [{ role: "system", content: instruction }, ...filtered];
 }
 

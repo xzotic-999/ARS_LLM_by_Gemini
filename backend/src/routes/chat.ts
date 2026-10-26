@@ -204,7 +204,73 @@ router.post("/completions", async (req, res, next) => {
         return;
       }
 
-      const trustedMessages = buildTrustedMessages(instruction, messages);
+      const { resolveAndEnrichMessagesWithExternalTools } = await import(
+        "../services/externalTools.js"
+      );
+      const toolEnrichment = await resolveAndEnrichMessagesWithExternalTools(messages);
+
+      // If the user explicitly asked for weather/exchange rates and the external API is down (and no cache exists),
+      // return a clear deterministic message and release the quota reservation so the model never invents numbers.
+      if (
+        toolEnrichment.allRequestedToolsFailed &&
+        toolEnrichment.deterministicErrorReply
+      ) {
+        await reservation.release("external_tool_unavailable");
+        const fallbackText = toolEnrichment.deterministicErrorReply;
+        if ("stream" in body && body.stream === true) {
+          res.status(200);
+          res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-transform");
+          res.setHeader("Connection", "keep-alive");
+          res.flushHeaders();
+          res.write(
+            `data: ${JSON.stringify({
+              id: `chatcmpl-${Date.now()}`,
+              object: "chat.completion.chunk",
+              choices: [
+                {
+                  index: 0,
+                  delta: { role: "assistant", content: fallbackText },
+                  finish_reason: null,
+                },
+              ],
+            })}\n\n`
+          );
+          res.write(
+            `data: ${JSON.stringify({
+              object: "chat.completion.chunk",
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+            })}\n\n`
+          );
+          res.write("data: [DONE]\n\n");
+          res.end();
+          return;
+        }
+
+        const currentQuotas = await getUserQuotaStatus(userId);
+        res.status(200).json({
+          id: `chatcmpl-${Date.now()}`,
+          object: "chat.completion",
+          model: env.FREELLM_MODEL,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: fallbackText,
+              },
+              finish_reason: "stop",
+            },
+          ],
+          quotas: currentQuotas,
+        });
+        return;
+      }
+
+      const trustedMessages = buildTrustedMessages(
+        instruction,
+        toolEnrichment.messages
+      );
       const { chatWithFreeLlm, streamChatWithFreeLlm } = await import(
         "../services/freeLlm.js"
       );
