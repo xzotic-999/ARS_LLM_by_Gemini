@@ -607,5 +607,164 @@ test("verifyFreeLlmConnection sends Bearer auth + Dev Tunnel header and never le
   assert.match(redirectReport.modelsCheck.error ?? "", /VS Code Dev Tunnel redirected/);
 });
 
+test("Plesk + Neon PostgreSQL: validateEnvConfig parses quoted DATABASE_URL with sslmode=require, overrides template placeholders, and enables AUTO_MIGRATE in production", async () => {
+  const { validateEnvConfig, resolveEnvFilePaths } = await import("../config/env.js");
+  const { buildPgPoolConfig } = await import("../db/index.js");
+  const { resolveMigrationsDir } = await import("../db/migrate.js");
+  const { existsSync } = await import("node:fs");
 
+  // Simulate Plesk environment where user pasted quoted values or left template POSTGRES_* alongside Neon DATABASE_URL
+  const neonEnv = validateEnvConfig({
+    NODE_ENV: '"production"',
+    DATABASE_URL:
+      '"postgresql://neondb_owner:NeonStrongSecret_2026!@ep-cool-darkness-123456-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"',
+    POSTGRES_HOST: "postgres",
+    POSTGRES_PASSWORD: "CHANGE_ME_POSTGRES_PASSWORD",
+    DB_URL: "postgresql://ars_llm_user:CHANGE_ME_POSTGRES_PASSWORD@postgres:5432/ars_llm_db",
+    POSTGRES_SSL_REJECT_UNAUTHORIZED: "false",
+    SESSION_SECRET: '"a_very_strong_production_session_secret_at_least_32_bytes"',
+    FREELLM_API_BASE_URL: '"https://v7skvft7-31415.euw.devtunnels.ms/v1"',
+    FREELLM_API_KEY: '"sk-live-freellm-production-key"',
+    ADMIN_BOOTSTRAP_EMAIL: '"admin@arsllm.ngtech.kz"',
+    ADMIN_BOOTSTRAP_PASSWORD: '"StrongAdminPass_2026!"',
+  });
+
+  assert.equal(
+    neonEnv.POSTGRES_HOST,
+    "ep-cool-darkness-123456-pooler.eu-central-1.aws.neon.tech"
+  );
+  assert.equal(neonEnv.POSTGRES_USER, "neondb_owner");
+  assert.equal(neonEnv.POSTGRES_PASSWORD, "NeonStrongSecret_2026!");
+  assert.equal(neonEnv.POSTGRES_DB, "neondb");
+  assert.equal(neonEnv.POSTGRES_PORT, 5432);
+  assert.equal(neonEnv.POSTGRES_SSL, true, "Neon sslmode=require must auto-enable POSTGRES_SSL");
+  assert.equal(neonEnv.POSTGRES_SSL_REJECT_UNAUTHORIZED, false);
+  assert.equal(neonEnv.AUTO_MIGRATE, true, "AUTO_MIGRATE must default to true in production");
+  assert.equal(neonEnv.TRUST_PROXY, true);
+  assert.equal(neonEnv.SERVE_STATIC_SPA, true);
+
+  // Verify buildPgPoolConfig strips sslmode/channel_binding so pg-connection-string does not override ssl object
+  const poolConfig = buildPgPoolConfig(neonEnv);
+  assert.ok(
+    !String(poolConfig.connectionString).includes("sslmode="),
+    "connectionString passed to pg.Pool must not contain sslmode= that overrides ssl config"
+  );
+  assert.ok(
+    !String(poolConfig.connectionString).includes("channel_binding="),
+    "connectionString passed to pg.Pool must strip channel_binding="
+  );
+  assert.deepEqual(poolConfig.ssl, { rejectUnauthorized: false });
+
+  // Verify default POSTGRES_SSL_REJECT_UNAUTHORIZED is true and stripping sslmode never disables TLS
+  const neonDefaultVerifyEnv = validateEnvConfig({
+    NODE_ENV: "production",
+    DATABASE_URL:
+      "postgresql://neondb_owner:NeonStrongSecret_2026!@ep-cool-darkness-123456-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require",
+    SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+    FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+    FREELLM_API_KEY: "sk-live-freellm-production-key",
+    ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
+    ADMIN_BOOTSTRAP_PASSWORD: "StrongAdminPass_2026!",
+  });
+  assert.equal(neonDefaultVerifyEnv.POSTGRES_SSL_REJECT_UNAUTHORIZED, true);
+  const defaultVerifyPoolConfig = buildPgPoolConfig({
+    ...neonDefaultVerifyEnv,
+    POSTGRES_SSL: false, // Even if caller passed false, URL sslmode=require must preserve TLS
+  });
+  assert.deepEqual(defaultVerifyPoolConfig.ssl, { rejectUnauthorized: true });
+
+  // Verify incomplete DATABASE_URL without password does not silently fall back to template POSTGRES_PASSWORD
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://neondb_owner@ep-cool-darkness.eu-central-1.aws.neon.tech/neondb",
+        POSTGRES_PASSWORD: "FallbackPasswordShouldNotBeUsed_2026!",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+        FREELLM_API_KEY: "sk-live-freellm-production-key",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongAdminPass_2026!",
+      }),
+    /Missing required PostgreSQL environment variables/
+  );
+
+  // Verify resolveEnvFilePaths and resolveMigrationsDir find valid paths
+  const envPaths = resolveEnvFilePaths();
+  assert.ok(envPaths.length >= 3, "Should check multiple .env candidate paths");
+
+  const migrationsDir = resolveMigrationsDir();
+  assert.ok(
+    existsSync(migrationsDir),
+    `Resolved migrations directory must exist: ${migrationsDir}`
+  );
+});
+
+test("runMigrations executes all 5 SQL migrations in order inside a transaction without advisory locks and is idempotent on repeat run", async () => {
+  const { runMigrations } = await import("../db/migrate.js");
+
+  const appliedInDb: string[] = [];
+  const executedQueries: string[] = [];
+
+  const mockPoolClient = {
+    async query(queryTextOrConfig: unknown, values?: unknown[]) {
+      const sql =
+        typeof queryTextOrConfig === "string"
+          ? queryTextOrConfig
+          : (queryTextOrConfig as { text: string }).text;
+      executedQueries.push(sql.trim());
+
+      if (sql.includes("information_schema.tables")) {
+        return { rows: [{ table_name: "migrations" }] };
+      }
+      if (sql.includes("information_schema.table_constraints")) {
+        return { rows: [{ constraint_name: "migrations_pkey" }] };
+      }
+      if (sql.includes('SELECT name FROM "public"."migrations"')) {
+        return { rows: appliedInDb.map((name) => ({ name })) };
+      }
+      const insertMatch = sql.match(
+        /INSERT INTO "public"\."migrations"\s*\(name,\s*run_on\)\s*VALUES\s*\('([^']+)'/i
+      );
+      if (insertMatch) {
+        appliedInDb.push(insertMatch[1]);
+        return { rows: [], rowCount: 1 };
+      }
+      if (values && sql.includes('INSERT INTO "public"."migrations"')) {
+        appliedInDb.push(String(values[0]));
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    },
+  };
+
+  // First run: all 5 migrations should be applied in exact numeric order
+  const firstRunApplied = await runMigrations(mockPoolClient);
+  assert.deepEqual(firstRunApplied, [
+    "001_initial_migration",
+    "002_conversation_user_id",
+    "003_messages_user_id_nullable",
+    "004_messages_cascade_delete",
+    "005_users_and_auth",
+  ]);
+  assert.deepEqual(appliedInDb, [
+    "001_initial_migration",
+    "002_conversation_user_id",
+    "003_messages_user_id_nullable",
+    "004_messages_cascade_delete",
+    "005_users_and_auth",
+  ]);
+  assert.ok(
+    executedQueries.includes("BEGIN") && executedQueries.includes("COMMIT"),
+    "Migrations must execute inside a single BEGIN...COMMIT transaction"
+  );
+  assert.ok(
+    !executedQueries.some((q) => q.includes("pg_try_advisory_lock") || q.includes("pg_advisory_lock")),
+    "Migrations must not use session-level advisory locks that break Neon PgBouncer transaction pooler"
+  );
+
+  // Second run: all 5 migrations are already recorded in `migrations` table -> 0 migrations applied
+  const secondRunApplied = await runMigrations(mockPoolClient);
+  assert.deepEqual(secondRunApplied, []);
+});
 

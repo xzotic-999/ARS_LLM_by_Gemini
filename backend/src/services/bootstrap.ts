@@ -88,11 +88,25 @@ export async function ensureBootstrapAdmin(
 
   const passwordHash = await hashPassword(password);
 
-  await db.query(
-    `INSERT INTO users (name, email, password, role, is_active, email_verified)
-     VALUES ($1, $2, $3, 'admin', true, true)`,
-    [name, email, passwordHash]
-  );
+  try {
+    await db.query(
+      `INSERT INTO users (name, email, password, role, is_active, email_verified)
+       VALUES ($1, $2, $3, 'admin', true, true)`,
+      [name, email, passwordHash]
+    );
+  } catch (err) {
+    const pgCode = (err as { code?: string } | null)?.code;
+    if (pgCode === "23505") {
+      const recheck = await db.query(
+        "SELECT id FROM users WHERE role = 'admin' AND is_active = true LIMIT 1"
+      );
+      if (recheck.rows.length > 0) {
+        console.log("[BOOTSTRAP] Active admin created concurrently by another instance; skipping.");
+        return "existing_admin";
+      }
+    }
+    throw err;
+  }
 
   console.log(`[BOOTSTRAP] Created initial admin user: ${email}`);
   return "created_admin";

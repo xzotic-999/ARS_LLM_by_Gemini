@@ -37,7 +37,7 @@ router.get("/:id", async (req, res, next) => {
     }
 
     const result = await pool.query(
-      "SELECT id, title, created_at, last_message_at FROM conversations WHERE id = $1",
+      "SELECT id, title, user_id, created_at, last_message_at FROM conversations WHERE id = $1",
       [id]
     );
 

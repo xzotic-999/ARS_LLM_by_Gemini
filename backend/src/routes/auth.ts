@@ -20,7 +20,7 @@ router.post("/login", async (req, res, next) => {
     }
 
     const result = await pool.query(
-      `SELECT id, name, email, password, role, is_active
+      `SELECT id, name, email, password, role, is_active, email_verified, created_at
        FROM users
        WHERE email = $1`,
       [email.trim().toLowerCase()]
@@ -63,8 +63,8 @@ router.post("/login", async (req, res, next) => {
         email: user.email,
         role: user.role,
         is_active: user.is_active,
-        email_verified: false,
-        created_at: new Date(user.created_at),
+        email_verified: Boolean(user.email_verified),
+        created_at: user.created_at ? new Date(user.created_at) : new Date(),
       };
 
       setSessionUser(req, publicUser);

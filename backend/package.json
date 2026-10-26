@@ -5,7 +5,7 @@
   "description": "ARS_LLM Backend Service",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node -e \"import('node:fs').then(fs=>fs.cpSync('src/migrations','dist/migrations',{recursive:true}))\"",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "migrate": "node dist/db/migrate.js",

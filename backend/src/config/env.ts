@@ -1,12 +1,47 @@
 import dotenv from "dotenv";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-// Load the root project .env regardless of the current working directory.
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(currentDir, "../../../");
-dotenv.config({ path: resolve(projectRoot, ".env") });
+
+/**
+ * Resolves all candidate .env file locations across project root, backend root,
+ * and current working directory so both Phusion Passenger (Plesk) and CLI scripts
+ * (`npm run migrate:backend` / `node dist/db/migrate.js`) find `.env` reliably.
+ */
+export function resolveEnvFilePaths(
+  baseDir: string = currentDir,
+  cwd: string = process.cwd()
+): string[] {
+  const candidates = [
+    process.env.DOTENV_CONFIG_PATH ? resolve(cwd, process.env.DOTENV_CONFIG_PATH) : "",
+    resolve(cwd, ".env"),
+    resolve(cwd, "backend/.env"),
+    resolve(cwd, "../.env"),
+    resolve(baseDir, "../../../.env"), // project root from backend/src/config or backend/dist/config
+    resolve(baseDir, "../../.env"),    // backend/.env from backend/src/config or backend/dist/config
+  ].filter(Boolean);
+  return Array.from(new Set(candidates));
+}
+
+export function loadDotEnvFiles(
+  baseDir: string = currentDir,
+  cwd: string = process.cwd()
+): string[] {
+  const loaded: string[] = [];
+  for (const envPath of resolveEnvFilePaths(baseDir, cwd)) {
+    if (existsSync(envPath)) {
+      dotenv.config({ path: envPath, override: false });
+      loaded.push(envPath);
+    }
+  }
+  return loaded;
+}
+
+loadDotEnvFiles();
 
 export interface Env {
   NODE_ENV: string;
@@ -67,12 +102,25 @@ const DEVELOPER_LOCAL_HOSTS = new Set([
   "[::1]",
 ]);
 
+function stripSurroundingQuotes(value: string | undefined): string {
+  if (!value) return "";
+  const trimmed = value.trim();
+  if (
+    trimmed.length >= 2 &&
+    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'")))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 /**
  * Returns true if the given hostname points to the developer's local machine
  * or Docker Desktop host bridge.
  */
 export function isDeveloperLocalHost(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
+  const normalized = stripSurroundingQuotes(hostname).toLowerCase();
   if (!normalized) return false;
   if (DEVELOPER_LOCAL_HOSTS.has(normalized)) return true;
   if (normalized.startsWith("127.")) return true;
@@ -86,7 +134,7 @@ export function isDeveloperLocalHost(hostname: string): boolean {
 export function isDeveloperLocalUrl(urlString: string): boolean {
   let parsed: URL;
   try {
-    parsed = new URL(urlString);
+    parsed = new URL(stripSurroundingQuotes(urlString));
   } catch {
     throw new Error(`Invalid URL format: ${urlString}`);
   }
@@ -97,8 +145,9 @@ export function isDeveloperLocalUrl(urlString: string): boolean {
 }
 
 function parseBool(value: string | undefined, defaultValue: boolean): boolean {
-  if (value === undefined || value.trim() === "") return defaultValue;
-  const normalized = value.trim().toLowerCase();
+  const cleaned = stripSurroundingQuotes(value);
+  if (!cleaned) return defaultValue;
+  const normalized = cleaned.toLowerCase();
   return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
@@ -108,27 +157,53 @@ function parseBool(value: string | undefined, defaultValue: boolean): boolean {
  * production configuration depends on the developer's local computer.
  */
 export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
-  const nodeEnv = rawEnv.NODE_ENV ?? "development";
+  const nodeEnv = stripSurroundingQuotes(rawEnv.NODE_ENV) || "development";
   const isProd = nodeEnv === "production";
 
-  const explicitDbUrl = (rawEnv.DATABASE_URL ?? rawEnv.DB_URL ?? "").trim();
+  const candidateDatabaseUrl = stripSurroundingQuotes(
+    rawEnv.DATABASE_URL ?? rawEnv.POSTGRES_URL ?? rawEnv.NEON_DATABASE_URL
+  );
+  const candidateLegacyDbUrl = stripSurroundingQuotes(rawEnv.DB_URL);
 
-  let postgresHost = (rawEnv.POSTGRES_HOST ?? "").trim();
-  let postgresPort = Number(rawEnv.POSTGRES_PORT ?? 5432);
-  let postgresUser = (rawEnv.POSTGRES_USER ?? "").trim();
-  let postgresPassword = rawEnv.POSTGRES_PASSWORD ?? "";
-  let postgresDb = (rawEnv.POSTGRES_DB ?? "").trim();
+  // Prefer DATABASE_URL over legacy DB_URL (especially if DB_URL still holds the .env.example placeholder)
+  const explicitDbUrl =
+    candidateDatabaseUrl ||
+    (candidateLegacyDbUrl &&
+    !candidateLegacyDbUrl.includes("CHANGE_ME_POSTGRES_PASSWORD")
+      ? candidateLegacyDbUrl
+      : "");
+
+  let postgresHost = stripSurroundingQuotes(rawEnv.POSTGRES_HOST);
+  let postgresPort = Number(stripSurroundingQuotes(rawEnv.POSTGRES_PORT) || 5432);
+  let postgresUser = stripSurroundingQuotes(rawEnv.POSTGRES_USER);
+  let postgresPassword = stripSurroundingQuotes(rawEnv.POSTGRES_PASSWORD);
+  let postgresDb = stripSurroundingQuotes(rawEnv.POSTGRES_DB);
+  let urlImpliesSsl = false;
+  let urlDisablesSsl = false;
 
   if (explicitDbUrl) {
     try {
       const parsedDb = new URL(explicitDbUrl);
-      if (!postgresHost) postgresHost = parsedDb.hostname;
-      if (!rawEnv.POSTGRES_PORT && parsedDb.port) {
-        postgresPort = Number(parsedDb.port);
+      postgresHost = parsedDb.hostname;
+      postgresPort = parsedDb.port ? Number(parsedDb.port) : 5432;
+      postgresUser = decodeURIComponent(parsedDb.username);
+      postgresPassword = decodeURIComponent(parsedDb.password);
+      postgresDb = decodeURIComponent(parsedDb.pathname.replace(/^\/+/, ""));
+
+      const sslMode = (parsedDb.searchParams.get("sslmode") ?? "").toLowerCase();
+      const sslParam = (parsedDb.searchParams.get("ssl") ?? "").toLowerCase();
+      if (sslMode === "disable" || sslParam === "false" || sslParam === "0") {
+        urlDisablesSsl = true;
+      } else if (
+        sslMode === "require" ||
+        sslMode === "verify-ca" ||
+        sslMode === "verify-full" ||
+        sslMode === "prefer" ||
+        sslParam === "true" ||
+        sslParam === "1"
+      ) {
+        urlImpliesSsl = true;
       }
-      if (!postgresUser) postgresUser = decodeURIComponent(parsedDb.username);
-      if (!postgresPassword) postgresPassword = decodeURIComponent(parsedDb.password);
-      if (!postgresDb) postgresDb = parsedDb.pathname.replace(/^\/+/, "");
     } catch {
       throw new Error("Invalid DATABASE_URL / DB_URL format.");
     }
@@ -136,6 +211,10 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
 
   if (!postgresHost) {
     postgresHost = "postgres";
+  }
+
+  if (postgresHost.toLowerCase().endsWith(".neon.tech") && !urlDisablesSsl) {
+    urlImpliesSsl = true;
   }
 
   if (!postgresUser || !postgresPassword || !postgresDb) {
@@ -156,7 +235,7 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     );
   }
 
-  let sessionSecret = (rawEnv.SESSION_SECRET ?? "").trim();
+  let sessionSecret = stripSurroundingQuotes(rawEnv.SESSION_SECRET);
   if (!sessionSecret) {
     if (isProd) {
       throw new Error(
@@ -175,7 +254,7 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
 
   const DEFAULT_CLOUD_FREELLM_BASE_URL =
     "https://v7skvft7-31415.euw.devtunnels.ms/v1";
-  const rawFreeLlmBaseUrl = (rawEnv.FREELLM_API_BASE_URL ?? "").trim().replace(/\/+$/, "");
+  const rawFreeLlmBaseUrl = stripSurroundingQuotes(rawEnv.FREELLM_API_BASE_URL).replace(/\/+$/, "");
   const normalizedRawBaseUrl = rawFreeLlmBaseUrl
     ? rawFreeLlmBaseUrl.endsWith("/v1")
       ? rawFreeLlmBaseUrl
@@ -196,14 +275,14 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     );
   }
 
-  const freellmApiKey = (rawEnv.FREELLM_API_KEY ?? "").trim();
+  const freellmApiKey = stripSurroundingQuotes(rawEnv.FREELLM_API_KEY);
   if (isProd && (!freellmApiKey || INSECURE_SECRET_BLACKLIST.has(freellmApiKey))) {
     throw new Error(
       "FREELLM_API_KEY is required in production and must not use a placeholder value."
     );
   }
 
-  const fallbackBaseUrl = (rawEnv.FREELLM_FALLBACK_BASE_URL ?? "").trim();
+  const fallbackBaseUrl = stripSurroundingQuotes(rawEnv.FREELLM_FALLBACK_BASE_URL);
   if (fallbackBaseUrl) {
     const isLocalFallback = isDeveloperLocalUrl(fallbackBaseUrl);
     if (isProd && isLocalFallback) {
@@ -213,8 +292,8 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     }
   }
 
-  const adminBootstrapEmail = (rawEnv.ADMIN_BOOTSTRAP_EMAIL ?? "").trim();
-  const adminBootstrapPassword = rawEnv.ADMIN_BOOTSTRAP_PASSWORD ?? "";
+  const adminBootstrapEmail = stripSurroundingQuotes(rawEnv.ADMIN_BOOTSTRAP_EMAIL);
+  const adminBootstrapPassword = stripSurroundingQuotes(rawEnv.ADMIN_BOOTSTRAP_PASSWORD);
 
   if (adminBootstrapPassword === "ChangeMe123!") {
     throw new Error(
@@ -235,45 +314,51 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     }
   }
 
+  const postgresSsl = urlDisablesSsl
+    ? false
+    : urlImpliesSsl
+      ? true
+      : parseBool(rawEnv.POSTGRES_SSL, false);
+
   const dbUrl =
     explicitDbUrl ||
     `postgresql://${encodeURIComponent(postgresUser)}:${encodeURIComponent(postgresPassword)}@${postgresHost}:${postgresPort}/${postgresDb}`;
 
   return {
     NODE_ENV: nodeEnv,
-    PORT: Number(rawEnv.PORT ?? 3000),
+    PORT: Number(stripSurroundingQuotes(rawEnv.PORT) || 3000),
     TRUST_PROXY: parseBool(rawEnv.TRUST_PROXY, isProd),
-    CORS_ORIGIN: (rawEnv.CORS_ORIGIN ?? "").trim(),
+    CORS_ORIGIN: stripSurroundingQuotes(rawEnv.CORS_ORIGIN),
     SERVE_STATIC_SPA: parseBool(rawEnv.SERVE_STATIC_SPA, isProd),
-    FRONTEND_DIST_PATH: (rawEnv.FRONTEND_DIST_PATH ?? "").trim(),
-    AUTO_MIGRATE: parseBool(rawEnv.AUTO_MIGRATE, false),
+    FRONTEND_DIST_PATH: stripSurroundingQuotes(rawEnv.FRONTEND_DIST_PATH),
+    AUTO_MIGRATE: parseBool(rawEnv.AUTO_MIGRATE, isProd),
     POSTGRES_HOST: postgresHost,
     POSTGRES_PORT: postgresPort,
     POSTGRES_USER: postgresUser,
     POSTGRES_PASSWORD: postgresPassword,
     POSTGRES_DB: postgresDb,
-    POSTGRES_SSL: parseBool(rawEnv.POSTGRES_SSL, false),
+    POSTGRES_SSL: postgresSsl,
     POSTGRES_SSL_REJECT_UNAUTHORIZED: parseBool(
       rawEnv.POSTGRES_SSL_REJECT_UNAUTHORIZED,
       true
     ),
     FREELLM_API_BASE_URL: freeLlmBaseUrl,
     FREELLM_API_KEY: freellmApiKey,
-    FREELLM_MODEL: (rawEnv.FREELLM_MODEL ?? "auto").trim() || "auto",
-    FREELLM_TIMEOUT_MS: Number(rawEnv.FREELLM_TIMEOUT_MS ?? 120_000),
+    FREELLM_MODEL: stripSurroundingQuotes(rawEnv.FREELLM_MODEL) || "auto",
+    FREELLM_TIMEOUT_MS: Number(stripSurroundingQuotes(rawEnv.FREELLM_TIMEOUT_MS) || 120_000),
     FREELLM_FALLBACK_BASE_URL: fallbackBaseUrl,
-    FREELLM_FALLBACK_API_KEY: (rawEnv.FREELLM_FALLBACK_API_KEY ?? "").trim(),
-    FREELLM_FALLBACK_MODEL: (rawEnv.FREELLM_FALLBACK_MODEL ?? "auto").trim() || "auto",
+    FREELLM_FALLBACK_API_KEY: stripSurroundingQuotes(rawEnv.FREELLM_FALLBACK_API_KEY),
+    FREELLM_FALLBACK_MODEL: stripSurroundingQuotes(rawEnv.FREELLM_FALLBACK_MODEL) || "auto",
     SESSION_SECRET: sessionSecret,
-    SESSION_MAX_AGE_MS: Number(rawEnv.SESSION_MAX_AGE_MS ?? 86400000),
-    RATE_LIMIT_WINDOW_MS: Number(rawEnv.RATE_LIMIT_WINDOW_MS ?? 900000),
-    RATE_LIMIT_MAX_REQUESTS: Number(rawEnv.RATE_LIMIT_MAX_REQUESTS ?? 30),
-    DAILY_QUOTA_DEFAULT: Number(rawEnv.DAILY_QUOTA_DEFAULT ?? 20),
-    MONTHLY_QUOTA_DEFAULT: Number(rawEnv.MONTHLY_QUOTA_DEFAULT ?? 500),
+    SESSION_MAX_AGE_MS: Number(stripSurroundingQuotes(rawEnv.SESSION_MAX_AGE_MS) || 86400000),
+    RATE_LIMIT_WINDOW_MS: Number(stripSurroundingQuotes(rawEnv.RATE_LIMIT_WINDOW_MS) || 900000),
+    RATE_LIMIT_MAX_REQUESTS: Number(stripSurroundingQuotes(rawEnv.RATE_LIMIT_MAX_REQUESTS) || 30),
+    DAILY_QUOTA_DEFAULT: Number(stripSurroundingQuotes(rawEnv.DAILY_QUOTA_DEFAULT) || 20),
+    MONTHLY_QUOTA_DEFAULT: Number(stripSurroundingQuotes(rawEnv.MONTHLY_QUOTA_DEFAULT) || 500),
     ADMIN_BOOTSTRAP_EMAIL: adminBootstrapEmail,
     ADMIN_BOOTSTRAP_PASSWORD: adminBootstrapPassword,
     ADMIN_BOOTSTRAP_NAME:
-      (rawEnv.ADMIN_BOOTSTRAP_NAME ?? "Administrator").trim() || "Administrator",
+      stripSurroundingQuotes(rawEnv.ADMIN_BOOTSTRAP_NAME) || "Administrator",
     DB_URL: dbUrl,
   };
 }
