@@ -14,17 +14,22 @@ import {
 } from 'lucide-react';
 import {
   ChatSession,
+  DEFAULT_ADMIN_USERS,
   DocumentItem,
   ModelParameters,
   NavSectionId,
   ProjectItem,
   PromptTemplate,
+  applyQuotaLimitChange,
+  canConfigureQuotas,
   validateModelParameters,
 } from '../utils/dashboardLogic';
 import {
   adminApi,
   AdminUserRecord,
   AdminUsageResponse,
+  QuotaLimits,
+  UserProfile,
 } from '../services/api';
 
 interface SecondaryViewProps {
@@ -38,24 +43,15 @@ interface SecondaryViewProps {
   onUseTemplate: (promptText: string) => void;
   onResetToNewChat: () => void;
   isDemoMode?: boolean;
+  user?: UserProfile | null;
+  quotas?: QuotaLimits | null;
+  persistedAdminUsers?: AdminUserRecord[];
+  onUpdateAdminUsers?: (
+    updatedUsers: AdminUserRecord[],
+    targetUserId: number,
+    updatedQuotas: QuotaLimits
+  ) => void;
 }
-
-const DEMO_ADMIN_USERS: AdminUserRecord[] = [
-  {
-    id: 1,
-    email: 'admin@ars_llm.local',
-    role: 'admin',
-    created_at: '2026-10-01T08:00:00.000Z',
-    quotas: { daily: { used: 4, limit: 100 }, monthly: { used: 38, limit: 2000 } },
-  },
-  {
-    id: 2,
-    email: 'employee@company.kz',
-    role: 'user',
-    created_at: '2026-10-05T09:30:00.000Z',
-    quotas: { daily: { used: 7, limit: 20 }, monthly: { used: 112, limit: 500 } },
-  },
-];
 
 const DEMO_ADMIN_USAGE: AdminUsageResponse = {
   summary: [
@@ -89,9 +85,14 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   onUseTemplate,
   onResetToNewChat,
   isDemoMode = false,
+  user = null,
+  quotas = null,
+  persistedAdminUsers = DEFAULT_ADMIN_USERS,
+  onUpdateAdminUsers,
 }) => {
-  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>([]);
-  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(null);
+  const isAdmin = canConfigureQuotas(user);
+  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>(persistedAdminUsers);
+  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(DEMO_ADMIN_USAGE);
   const [adminLoading, setAdminLoading] = useState(false);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [quotaDrafts, setQuotaDrafts] = useState<
@@ -99,20 +100,29 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   >({});
   const [quotaSaveMessage, setQuotaSaveMessage] = useState<string | null>(null);
 
+  const syncDraftsFromUsers = (usersList: AdminUserRecord[]) => {
+    const drafts: Record<number, { daily: string; monthly: string }> = {};
+    for (const u of usersList) {
+      drafts[u.id] = {
+        daily: u.quotas.daily.limit !== null ? String(u.quotas.daily.limit) : '',
+        monthly: u.quotas.monthly.limit !== null ? String(u.quotas.monthly.limit) : '',
+      };
+    }
+    setQuotaDrafts(drafts);
+  };
+
   const loadAdminData = async () => {
+    if (!isAdmin) return;
     setAdminLoading(true);
     setAdminError(null);
     if (isDemoMode) {
-      setAdminUsers(DEMO_ADMIN_USERS);
+      const sourceUsers =
+        persistedAdminUsers && persistedAdminUsers.length > 0
+          ? persistedAdminUsers
+          : DEFAULT_ADMIN_USERS;
+      setAdminUsers(sourceUsers);
       setAdminUsage(DEMO_ADMIN_USAGE);
-      const drafts: Record<number, { daily: string; monthly: string }> = {};
-      for (const u of DEMO_ADMIN_USERS) {
-        drafts[u.id] = {
-          daily: u.quotas.daily.limit !== null ? String(u.quotas.daily.limit) : '',
-          monthly: u.quotas.monthly.limit !== null ? String(u.quotas.monthly.limit) : '',
-        };
-      }
-      setQuotaDrafts(drafts);
+      syncDraftsFromUsers(sourceUsers);
       setAdminLoading(false);
       return;
     }
@@ -124,14 +134,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
       ]);
       setAdminUsers(usersRes.users);
       setAdminUsage(usageRes);
-      const drafts: Record<number, { daily: string; monthly: string }> = {};
-      for (const u of usersRes.users) {
-        drafts[u.id] = {
-          daily: u.quotas.daily.limit !== null ? String(u.quotas.daily.limit) : '',
-          monthly: u.quotas.monthly.limit !== null ? String(u.quotas.monthly.limit) : '',
-        };
-      }
-      setQuotaDrafts(drafts);
+      syncDraftsFromUsers(usersRes.users);
     } catch (err) {
       setAdminError(
         err instanceof Error ? err.message : 'Не удалось загрузить данные администратора.'
@@ -142,59 +145,189 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   };
 
   useEffect(() => {
-    if (activeNav === 'admin') {
+    if (activeNav === 'admin' && isAdmin) {
       loadAdminData();
     }
-  }, [activeNav, isDemoMode]);
+  }, [activeNav, isDemoMode, isAdmin]);
+
+  useEffect(() => {
+    if (isDemoMode && persistedAdminUsers && persistedAdminUsers.length > 0) {
+      setAdminUsers(persistedAdminUsers);
+      syncDraftsFromUsers(persistedAdminUsers);
+    }
+  }, [isDemoMode, persistedAdminUsers]);
 
   const handleSaveUserQuota = async (userId: number) => {
     const draft = quotaDrafts[userId];
     if (!draft) return;
 
-    const dailyLimit = draft.daily.trim() === '' ? null : parseInt(draft.daily, 10);
-    const monthlyLimit = draft.monthly.trim() === '' ? null : parseInt(draft.monthly, 10);
+    const validation = applyQuotaLimitChange({
+      actor: user,
+      users: adminUsers,
+      targetUserId: userId,
+      dailyInput: draft.daily,
+      monthlyInput: draft.monthly,
+    });
 
-    if (
-      (dailyLimit !== null && (Number.isNaN(dailyLimit) || dailyLimit < 0)) ||
-      (monthlyLimit !== null && (Number.isNaN(monthlyLimit) || monthlyLimit < 0))
-    ) {
-      setAdminError('Лимиты должны быть неотрицательными целыми числами');
+    if (!validation.ok) {
+      setAdminError(validation.error);
       return;
     }
 
     setAdminError(null);
     setQuotaSaveMessage(null);
 
+    const dailyLimit = validation.updatedQuotas.daily.limit;
+    const monthlyLimit = validation.updatedQuotas.monthly.limit;
+
     if (isDemoMode) {
-      setAdminUsers((prev) =>
-        prev.map((u) =>
-          u.id === userId
-            ? {
-                ...u,
-                quotas: {
-                  daily: { ...u.quotas.daily, limit: dailyLimit },
-                  monthly: { ...u.quotas.monthly, limit: monthlyLimit },
-                },
-              }
-            : u
-        )
-      );
-      setQuotaSaveMessage(`Квоты пользователя #${userId} обновлены`);
+      setAdminUsers(validation.users);
+      onUpdateAdminUsers?.(validation.users, userId, validation.updatedQuotas);
+      const targetEmail = adminUsers.find((u) => u.id === userId)?.email ?? `#${userId}`;
+      setQuotaSaveMessage(`Квоты для ${targetEmail} сохранены`);
       return;
     }
 
     try {
       const updated = await adminApi.setUserQuotas(userId, dailyLimit, monthlyLimit);
-      setAdminUsers((prev) =>
-        prev.map((u) => (u.id === userId ? { ...u, quotas: updated.quotas } : u))
+      const nextUsers = adminUsers.map((u) =>
+        u.id === userId ? { ...u, quotas: updated.quotas } : u
       );
-      setQuotaSaveMessage(`Квоты пользователя #${userId} сохранены`);
+      setAdminUsers(nextUsers);
+      onUpdateAdminUsers?.(nextUsers, userId, updated.quotas);
+      const targetEmail = adminUsers.find((u) => u.id === userId)?.email ?? `#${userId}`;
+      setQuotaSaveMessage(`Квоты для ${targetEmail} сохранены`);
     } catch (err) {
       setAdminError(
         err instanceof Error ? err.message : 'Ошибка обновления квот пользователя'
       );
     }
   };
+
+  // Read-only quota view for regular users (or if non-admin navigates to 'admin' or 'quotas')
+  if (activeNav === 'quotas' || (activeNav === 'admin' && !isAdmin)) {
+    const effectiveQuotas: QuotaLimits = quotas ?? {
+      daily: { used: 4, limit: 20 },
+      monthly: { used: 38, limit: 500 },
+    };
+    const dailyLimit =
+      effectiveQuotas.daily.limit && effectiveQuotas.daily.limit > 0
+        ? effectiveQuotas.daily.limit
+        : null;
+    const monthlyLimit =
+      effectiveQuotas.monthly.limit && effectiveQuotas.monthly.limit > 0
+        ? effectiveQuotas.monthly.limit
+        : null;
+    const dailyPct = dailyLimit
+      ? Math.min(100, Math.round((effectiveQuotas.daily.used / dailyLimit) * 100))
+      : 0;
+    const monthlyPct = monthlyLimit
+      ? Math.min(100, Math.round((effectiveQuotas.monthly.used / monthlyLimit) * 100))
+      : 0;
+    const dailyRemaining =
+      dailyLimit !== null ? Math.max(0, dailyLimit - effectiveQuotas.daily.used) : null;
+    const monthlyRemaining =
+      monthlyLimit !== null ? Math.max(0, monthlyLimit - effectiveQuotas.monthly.used) : null;
+
+    return (
+      <section
+        aria-label="Мои квоты запросов"
+        className="max-w-[920px] mx-auto w-full px-6 py-8 space-y-6"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
+              <span>Мои квоты и лимиты запросов</span>
+            </h2>
+            <p className="text-[13.5px] text-slate-600 dark:text-slate-400 mt-1">
+              Персональная статистика использования ИИ-шлюза ARS LLM · Режим просмотра для сотрудника.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onResetToNewChat}
+            className="focus-ring px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+          >
+            К новому чату
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] space-y-3">
+            <div className="flex items-center justify-between text-[13px] text-slate-500 dark:text-slate-400">
+              <span>Дневной лимит запросов</span>
+              <span className="tabular-nums font-medium">Обновление в 00:00 UTC</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <div className="text-[26px] font-bold text-slate-900 dark:text-white tabular-nums">
+                {effectiveQuotas.daily.used}{' '}
+                <span className="text-[16px] font-normal text-slate-500 dark:text-slate-400">
+                  / {dailyLimit ?? 'Без лимита'}
+                </span>
+              </div>
+              <div className="text-[12.5px] text-slate-600 dark:text-slate-300 tabular-nums">
+                {dailyRemaining !== null ? `Доступно: ${dailyRemaining}` : 'Без ограничений'}
+              </div>
+            </div>
+            <div
+              role="progressbar"
+              aria-label="Использование дневной квоты"
+              aria-valuenow={effectiveQuotas.daily.used}
+              aria-valuemin={0}
+              aria-valuemax={dailyLimit ?? 100}
+              className="h-2 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
+            >
+              <div
+                className="h-full rounded-full bg-[#4F46E5] dark:bg-indigo-400 transition-[width] duration-300"
+                style={{ width: `${dailyLimit ? dailyPct : 10}%` }}
+              />
+            </div>
+          </div>
+
+          <div className="p-5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] space-y-3">
+            <div className="flex items-center justify-between text-[13px] text-slate-500 dark:text-slate-400">
+              <span>Месячный лимит запросов</span>
+              <span className="tabular-nums font-medium">Текущий расчётный месяц</span>
+            </div>
+            <div className="flex items-baseline justify-between">
+              <div className="text-[26px] font-bold text-slate-900 dark:text-white tabular-nums">
+                {effectiveQuotas.monthly.used}{' '}
+                <span className="text-[16px] font-normal text-slate-500 dark:text-slate-400">
+                  / {monthlyLimit ?? 'Без лимита'}
+                </span>
+              </div>
+              <div className="text-[12.5px] text-slate-600 dark:text-slate-300 tabular-nums">
+                {monthlyRemaining !== null ? `Доступно: ${monthlyRemaining}` : 'Без ограничений'}
+              </div>
+            </div>
+            <div
+              role="progressbar"
+              aria-label="Использование месячной квоты"
+              aria-valuenow={effectiveQuotas.monthly.used}
+              aria-valuemin={0}
+              aria-valuemax={monthlyLimit ?? 100}
+              className="h-2 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
+            >
+              <div
+                className="h-full rounded-full bg-[#4F46E5] dark:bg-indigo-400 transition-[width] duration-300"
+                style={{ width: `${monthlyLimit ? monthlyPct : 10}%` }}
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#131829]/70 text-[13px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center justify-between gap-3">
+          <span>
+            Учётная запись: <strong className="text-slate-900 dark:text-white">{user?.email ?? 'employee@company.kz'}</strong> · Роль: Сотрудник (только просмотр квот).
+          </span>
+          <span className="text-slate-500 dark:text-slate-400">
+            Изменение лимитов выполняется администратором системы.
+          </span>
+        </div>
+      </section>
+    );
+  }
 
   if (activeNav === 'admin') {
     return (
@@ -206,7 +339,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
               <span>Администрирование и управление квотами</span>
             </h2>
             <p className="text-[13.5px] text-slate-600 dark:text-slate-400 mt-1">
-              Управление дневными и месячными лимитами запросов сотрудников и статистика использования API.
+              Настройка дневных и месячных лимитов запросов сотрудников (доступно только администратору).
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -292,16 +425,8 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
                     <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
                       {u.email}
                     </td>
-                    <td className="py-3.5 px-4">
-                      <span
-                        className={`inline-flex px-2 py-0.5 rounded-md text-[11.5px] font-semibold ${
-                          u.role === 'admin'
-                            ? 'bg-indigo-50 dark:bg-indigo-500/20 text-indigo-700 dark:text-indigo-300'
-                            : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
-                        }`}
-                      >
-                        {u.role}
-                      </span>
+                    <td className="py-3.5 px-4 text-[13px] text-slate-600 dark:text-slate-300">
+                      {u.role === 'admin' ? 'Администратор' : 'Сотрудник'}
                     </td>
                     <td className="py-3.5 px-4 tabular-nums">
                       <div className="flex items-center gap-2">

@@ -86,7 +86,7 @@ export const QuickPrompts: React.FC<QuickPromptsProps> = ({
             key={qp.id}
             type="button"
             onClick={() => onSelectQuickPrompt(qp)}
-            className="focus-ring group h-[44px] w-full px-3 rounded-xl border border-[#E5E7EB] dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 hover:shadow-xs flex items-center gap-2.5 text-[13px] font-medium text-[#111827] dark:text-slate-100 transition-all text-left"
+            className="focus-ring group h-[44px] w-full px-3 rounded-xl border border-[#E5E7EB] dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 hover:shadow-xs flex items-center gap-2.5 text-[13px] font-medium text-[#111827] dark:text-slate-100 text-left"
           >
             {renderIconBadge(qp.iconType)}
             <span className="truncate">{qp.label}</span>

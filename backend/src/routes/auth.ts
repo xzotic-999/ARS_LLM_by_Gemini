@@ -69,9 +69,18 @@ router.post("/login", async (req, res, next) => {
 
       setSessionUser(req, publicUser);
 
-      res.json({
-        user: publicUser,
-      });
+      getUserQuotaStatus(user.id)
+        .then((quotas) => {
+          res.json({
+            user: { ...publicUser, quotas },
+            quotas,
+          });
+        })
+        .catch(() => {
+          res.json({
+            user: publicUser,
+          });
+        });
     });
   } catch (err) {
     next(err);
@@ -103,7 +112,7 @@ router.get("/me", async (req, res) => {
   }
   try {
     const quotas = await getUserQuotaStatus(user.id);
-    res.json({ user, quotas });
+    res.json({ user: { ...user, quotas }, quotas });
   } catch {
     res.json({ user });
   }
@@ -120,7 +129,7 @@ router.get("/quotas", async (req, res, next) => {
   }
   try {
     const quotas = await getUserQuotaStatus(user.id);
-    res.json(quotas);
+    res.json({ ...quotas, quotas });
   } catch (err) {
     next(err);
   }

@@ -22,6 +22,7 @@ import {
   ChatListCategory,
   ChatSession,
   NavSectionId,
+  canConfigureQuotas,
 } from '../utils/dashboardLogic';
 import { QuotaLimits, UserProfile } from '../services/api';
 
@@ -41,6 +42,7 @@ interface SidebarProps {
   quotas?: QuotaLimits | null;
   onLogout?: () => Promise<void> | void;
   isDemoMode?: boolean;
+  onSwitchDemoRole?: (role: 'admin' | 'user') => void;
   searchQuery: string;
   onSearchChange: (q: string) => void;
   onOpenCommandSearch: () => void;
@@ -77,6 +79,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   quotas = null,
   onLogout,
   isDemoMode = false,
+  onSwitchDemoRole,
   searchQuery,
   onSearchChange,
   onOpenCommandSearch,
@@ -93,8 +96,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
 
+  const isAdmin = canConfigureQuotas(user);
   const visibleNavItems = BASE_NAV_ITEMS.filter(
-    (item) => !item.adminOnly || user?.role === 'admin'
+    (item) => !item.adminOnly || isAdmin
   );
 
   const handleCreateListSubmit = (e: React.FormEvent) => {
@@ -159,6 +163,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         return <File className={`w-[18px] h-[18px] shrink-0 stroke-[1.7] ${colorClass}`} aria-hidden="true" />;
       case 'history':
         return <Clock className={`w-[18px] h-[18px] shrink-0 stroke-[1.7] ${colorClass}`} aria-hidden="true" />;
+      case 'quotas':
       case 'admin':
         return <Shield className={`w-[18px] h-[18px] shrink-0 stroke-[1.7] ${colorClass}`} aria-hidden="true" />;
     }
@@ -166,13 +171,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const displayUserName =
     user?.name?.trim() ||
-    (user?.role === 'admin' ? 'Администратор' : 'Сотрудник');
+    (isAdmin ? 'Администратор' : 'Сотрудник');
   const displayUserEmail = user?.email || 'employee@company.kz';
 
   const sidebarContent = (
     <aside
       aria-label="Основная навигация"
-      className={`flex flex-col h-full min-h-0 overflow-hidden bg-[#FAFAFC] dark:bg-[#111524] border-r border-[#E6E8F0] dark:border-slate-800/90 select-none transition-all duration-200 ${
+      className={`flex flex-col h-full min-h-0 overflow-hidden bg-[#FAFAFC] dark:bg-[#111524] border-r border-[#E6E8F0] dark:border-slate-800/90 select-none transition-[width] duration-200 ${
         collapsed ? 'w-[76px]' : 'w-[268px]'
       }`}
     >
@@ -503,7 +508,37 @@ export const Sidebar: React.FC<SidebarProps> = ({
           };
 
           return (
-            <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white/90 dark:bg-[#151A2D] space-y-2">
+            <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white dark:bg-[#151A2D] space-y-2">
+              <div className="flex items-center justify-between text-[11px] font-semibold text-[#6B7280] dark:text-slate-400">
+                <span>Квоты запросов</span>
+                {isAdmin ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectCategory(null);
+                      onSelectNav('admin');
+                      onCloseMobile();
+                    }}
+                    className="focus-ring text-[#4F46E5] dark:text-indigo-400 hover:underline font-semibold"
+                  >
+                    Настроить
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSelectCategory(null);
+                      onSelectNav('quotas');
+                      onCloseMobile();
+                    }}
+                    className="focus-ring text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 font-medium"
+                    title="Просмотр ваших персональных лимитов"
+                  >
+                    Только просмотр
+                  </button>
+                )}
+              </div>
+
               <div className="space-y-1">
                 <div className="flex items-center justify-between text-xs font-medium text-[#4B5563] dark:text-slate-300">
                   <span>Дневной лимит</span>
@@ -520,7 +555,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className="h-1.5 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
                 >
                   <div
-                    className={`h-full rounded-full transition-all duration-300 ${getBarColor(dailyPct)}`}
+                    className={`h-full rounded-full transition-[width] duration-300 ${getBarColor(dailyPct)}`}
                     style={{ width: `${dailyLimit ? dailyPct : 10}%` }}
                   />
                 </div>
@@ -542,7 +577,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className="h-1.5 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
                 >
                   <div
-                    className={`h-full rounded-full transition-all duration-300 ${getBarColor(monthlyPct)}`}
+                    className={`h-full rounded-full transition-[width] duration-300 ${getBarColor(monthlyPct)}`}
                     style={{ width: `${monthlyLimit ? monthlyPct : 10}%` }}
                   />
                 </div>
@@ -578,7 +613,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 onClick={() => setProfileMenuOpen((prev) => !prev)}
                 aria-label="Меню профиля сотрудника"
                 aria-expanded={profileMenuOpen}
-                className="focus-ring p-1.5 rounded-lg text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors shrink-0"
+                className="focus-ring p-1.5 rounded-lg text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 shrink-0"
               >
                 <MoreVertical className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -592,9 +627,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className="absolute bottom-14 left-4 right-4 p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-30 text-[12.5px] space-y-1"
             >
               <div className="px-2.5 py-1.5 text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-700/70">
-                {isDemoMode ? 'Демо-режим UI · WCAG 2.1 AA' : 'Корпоративный аккаунт · WCAG 2.1 AA'}
+                {isDemoMode
+                  ? `Роль: ${isAdmin ? 'Администратор' : 'Сотрудник'} · Демо`
+                  : `Роль: ${isAdmin ? 'Администратор' : 'Сотрудник'}`}
               </div>
-              {user?.role === 'admin' && (
+              {isAdmin ? (
                 <button
                   type="button"
                   role="menuitem"
@@ -605,7 +642,38 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
                 >
                   <Shield className="w-3.5 h-3.5 text-indigo-500" aria-hidden="true" />
-                  <span>Админ-панель и квоты</span>
+                  <span>Управление квотами (Админ)</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    onSelectNav('quotas');
+                    setProfileMenuOpen(false);
+                  }}
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
+                >
+                  <Shield className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
+                  <span>Мои квоты (только просмотр)</span>
+                </button>
+              )}
+              {isDemoMode && onSwitchDemoRole && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    onSwitchDemoRole(isAdmin ? 'user' : 'admin');
+                    setProfileMenuOpen(false);
+                  }}
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 font-medium flex items-center gap-2"
+                >
+                  <User className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>
+                    {isAdmin
+                      ? 'Переключить на: Сотрудник'
+                      : 'Переключить на: Администратор'}
+                  </span>
                 </button>
               )}
               <button

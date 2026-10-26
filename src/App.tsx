@@ -20,6 +20,7 @@ import {
   ChatListCategory,
   ChatMessage,
   ChatSession,
+  DEFAULT_ADMIN_USERS,
   DEFAULT_MODEL_PARAMETERS,
   INITIAL_CHAT_LISTS,
   INITIAL_DOCUMENTS,
@@ -28,14 +29,20 @@ import {
   INITIAL_TEMPLATES,
   ModelParameters,
   NavSectionId,
+  PersistedWorkspaceState,
   QUICK_PROMPTS,
   QuickPrompt,
+  QuotaUpdateTargetUser,
   ThemeMode,
+  WORKSPACE_STORAGE_KEY,
+  applyThemeWithSmoothTransition,
+  canConfigureQuotas,
   createCustomChatList,
+  deserializeWorkspaceState,
   filterWorkspaceContent,
   formatTimestampShort,
   mapBackendConversationToSession,
-  submitChatPrompt,
+  serializeWorkspaceState,
 } from './utils/dashboardLogic';
 import {
   ApiError,
@@ -73,14 +80,21 @@ function buildPromptWithAttachments(
   return `${trimmedPrompt}\n\n${sections.join('\n\n')}`;
 }
 
-const DEMO_USER: UserProfile = {
-  id: 1,
+const DEMO_EMPLOYEE_USER: UserProfile = {
+  id: 2,
   email: 'employee@company.kz',
   name: 'Сотрудник',
+  role: 'user',
+};
+
+const DEMO_ADMIN_USER: UserProfile = {
+  id: 1,
+  email: 'admin@ars_llm.local',
+  name: 'Администратор ИТ',
   role: 'admin',
 };
 
-const DEMO_QUOTAS: QuotaLimits = {
+const DEFAULT_DEMO_QUOTAS: QuotaLimits = {
   daily: { used: 4, limit: 20 },
   monthly: { used: 38, limit: 500 },
 };
@@ -91,24 +105,79 @@ function hasDemoQueryParam(): boolean {
   return params.get('demo') === '1' || params.get('autostart') === '1';
 }
 
-export default function App() {
-  const [theme, setTheme] = useState<ThemeMode>('light');
-  const [authChecked, setAuthChecked] = useState<boolean>(() => hasDemoQueryParam());
-  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => hasDemoQueryParam());
-  const [user, setUser] = useState<UserProfile | null>(() =>
-    hasDemoQueryParam() ? DEMO_USER : null
-  );
-  const [quotas, setQuotas] = useState<QuotaLimits | null>(() =>
-    hasDemoQueryParam() ? DEMO_QUOTAS : null
-  );
+function getQueryDemoRole(): 'user' | 'admin' | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const roleParam = params.get('role');
+  if (roleParam === 'admin' || roleParam === 'user') {
+    return roleParam;
+  }
+  return null;
+}
 
-  const [activeNav, setActiveNav] = useState<NavSectionId>('chats');
-  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(null);
-  const [chatLists, setChatLists] = useState<ChatListCategory[]>(INITIAL_CHAT_LISTS);
-  const [sessions, setSessions] = useState<ChatSession[]>(() =>
-    hasDemoQueryParam() ? INITIAL_SESSIONS : []
+function readPersistedWorkspace(): PersistedWorkspaceState | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return deserializeWorkspaceState(window.localStorage.getItem(WORKSPACE_STORAGE_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function getQuotasForDemoRole(
+  role: 'user' | 'admin',
+  adminUsers: QuotaUpdateTargetUser[]
+): QuotaLimits {
+  const targetEmail = role === 'admin' ? 'admin@ars_llm.local' : 'employee@company.kz';
+  const entry =
+    adminUsers.find((u) => u.email === targetEmail) ??
+    adminUsers.find((u) => u.email === 'employee@company.kz');
+  if (!entry) return DEFAULT_DEMO_QUOTAS;
+  return entry.quotas;
+}
+
+export default function App() {
+  const initialPersisted = useMemo(() => readPersistedWorkspace(), []);
+  const initialDemoActive = hasDemoQueryParam() || Boolean(initialPersisted?.isDemoMode);
+  const initialDemoRole: 'user' | 'admin' =
+    getQueryDemoRole() ?? initialPersisted?.demoRole ?? 'user';
+  const initialAdminUsers = initialPersisted?.adminUsers ?? DEFAULT_ADMIN_USERS;
+
+  const [theme, setTheme] = useState<ThemeMode>(() => initialPersisted?.theme ?? 'light');
+  const [authChecked, setAuthChecked] = useState<boolean>(() => initialDemoActive);
+  const [isDemoMode, setIsDemoMode] = useState<boolean>(() => initialDemoActive);
+  const [demoRole, setDemoRole] = useState<'user' | 'admin'>(() => initialDemoRole);
+  const [adminUsers, setAdminUsers] = useState<QuotaUpdateTargetUser[]>(() => initialAdminUsers);
+
+  const [user, setUser] = useState<UserProfile | null>(() => {
+    if (!initialDemoActive) return null;
+    return initialDemoRole === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER;
+  });
+
+  const [backendQuotas, setBackendQuotas] = useState<QuotaLimits | null>(null);
+
+  const [activeNav, setActiveNav] = useState<NavSectionId>(() => {
+    const savedNav = initialPersisted?.activeNav ?? 'chats';
+    if (savedNav === 'admin' && initialDemoActive && initialDemoRole !== 'admin') {
+      return 'quotas';
+    }
+    return savedNav;
+  });
+  const [activeCategoryId, setActiveCategoryId] = useState<string | null>(
+    () => initialPersisted?.activeCategoryId ?? null
   );
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [chatLists, setChatLists] = useState<ChatListCategory[]>(
+    () => initialPersisted?.chatLists ?? INITIAL_CHAT_LISTS
+  );
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    if (initialPersisted?.sessions && initialPersisted.sessions.length > 0) {
+      return initialPersisted.sessions;
+    }
+    return initialDemoActive ? INITIAL_SESSIONS : [];
+  });
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(
+    () => initialPersisted?.activeSessionId ?? null
+  );
 
   const [promptValue, setPromptValue] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -118,7 +187,9 @@ export default function App() {
   const [promptLibraryOpen, setPromptLibraryOpen] = useState(false);
   const [modelParamsOpen, setModelParamsOpen] = useState(false);
   const [commandSearchOpen, setCommandSearchOpen] = useState(false);
-  const [modelParams, setModelParams] = useState<ModelParameters>(DEFAULT_MODEL_PARAMETERS);
+  const [modelParams, setModelParams] = useState<ModelParameters>(
+    () => initialPersisted?.modelParams ?? DEFAULT_MODEL_PARAMETERS
+  );
 
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -139,6 +210,47 @@ export default function App() {
     }
   }, [theme]);
 
+  const handleSelectTheme = useCallback(
+    (nextTheme: ThemeMode) => {
+      if (nextTheme === theme) return;
+      applyThemeWithSmoothTransition(nextTheme, setTheme);
+    },
+    [theme]
+  );
+
+  // Persist workspace state (chats, active session, quotas, role, theme) so refresh never loses data
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const payload = serializeWorkspaceState({
+        theme,
+        isDemoMode,
+        demoRole,
+        sessions,
+        activeSessionId,
+        activeNav,
+        activeCategoryId,
+        chatLists,
+        adminUsers,
+        modelParams,
+      });
+      window.localStorage.setItem(WORKSPACE_STORAGE_KEY, payload);
+    } catch {
+      // Ignore storage quota errors in restricted environments
+    }
+  }, [
+    theme,
+    isDemoMode,
+    demoRole,
+    sessions,
+    activeSessionId,
+    activeNav,
+    activeCategoryId,
+    chatLists,
+    adminUsers,
+    modelParams,
+  ]);
+
   // Global Ctrl+K / Cmd+K shortcut for search
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -151,11 +263,18 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  const quotas = useMemo<QuotaLimits | null>(() => {
+    if (isDemoMode) {
+      return getQuotasForDemoRole(demoRole, adminUsers);
+    }
+    return backendQuotas;
+  }, [isDemoMode, demoRole, adminUsers, backendQuotas]);
+
   const refreshQuotas = useCallback(async () => {
     if (isDemoMode) return;
     try {
       const res = await authApi.quotas();
-      setQuotas(res.quotas);
+      setBackendQuotas(res.quotas);
     } catch {
       // Non-fatal if quotas endpoint fails
     }
@@ -171,7 +290,7 @@ export default function App() {
           const existing = prevById.get(`conv-${conv.id}`);
           return mapBackendConversationToSession(
             conv,
-            [],
+            conv.messages ?? [],
             existing
           );
         });
@@ -197,7 +316,7 @@ export default function App() {
         if (cancelled) return;
         setUser(meRes.user);
         if (meRes.user.quotas) {
-          setQuotas(meRes.user.quotas);
+          setBackendQuotas(meRes.user.quotas);
         } else {
           refreshQuotas();
         }
@@ -222,19 +341,31 @@ export default function App() {
     const res = await authApi.login(email, password);
     setIsDemoMode(false);
     setUser(res.user);
+    if (res.user.quotas) {
+      setBackendQuotas(res.user.quotas);
+    }
     setActiveSessionId(null);
     setActiveNav('chats');
     await Promise.all([loadConversations(), refreshQuotas()]);
   };
 
-  const handleEnterDemoMode = () => {
+  const handleEnterDemoMode = (role: 'user' | 'admin' = 'user') => {
     setIsDemoMode(true);
-    setUser(DEMO_USER);
-    setQuotas(DEMO_QUOTAS);
-    setSessions(INITIAL_SESSIONS);
-    setActiveSessionId(null);
+    setDemoRole(role);
+    setUser(role === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER);
+    setSessions((prev) => (prev.length > 0 ? prev : INITIAL_SESSIONS));
     setActiveNav('chats');
     setStreamError(null);
+  };
+
+  const handleSwitchDemoRole = (role: 'user' | 'admin') => {
+    setDemoRole(role);
+    setUser(role === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER);
+    if (role !== 'admin' && activeNav === 'admin') {
+      setActiveNav('quotas');
+    } else if (role === 'admin' && activeNav === 'quotas') {
+      setActiveNav('admin');
+    }
   };
 
   const handleLogout = async () => {
@@ -251,8 +382,7 @@ export default function App() {
     }
     setIsDemoMode(false);
     setUser(null);
-    setQuotas(null);
-    setSessions([]);
+    setBackendQuotas(null);
     setActiveSessionId(null);
     setStreamError(null);
   };
@@ -276,7 +406,6 @@ export default function App() {
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== sessionId) return s;
-          // Always sync messages (even when msgs is empty!) to avoid stale messages
           const mapped: ChatMessage[] = msgs
             .filter((m) => m.role === 'user' || m.role === 'assistant')
             .map((m) => ({
@@ -314,7 +443,6 @@ export default function App() {
       try {
         await conversationsApi.rename(target.conversationId, trimmed);
       } catch {
-        // Reload list if rename failed
         loadConversations();
       }
     }
@@ -460,13 +588,20 @@ export default function App() {
         setActiveSessionId(targetSessionId);
       }
 
-      setQuotas((prev) =>
-        prev
-          ? {
-              daily: { ...prev.daily, used: prev.daily.used + 1 },
-              monthly: { ...prev.monthly, used: prev.monthly.used + 1 },
-            }
-          : prev
+      const activeEmail =
+        demoRole === 'admin' ? 'admin@ars_llm.local' : 'employee@company.kz';
+      setAdminUsers((prev) =>
+        prev.map((u) =>
+          u.email === activeEmail
+            ? {
+                ...u,
+                quotas: {
+                  daily: { ...u.quotas.daily, used: u.quotas.daily.used + 1 },
+                  monthly: { ...u.quotas.monthly, used: u.quotas.monthly.used + 1 },
+                },
+              }
+            : u
+        )
       );
       setActiveNav('chats');
       setPromptValue('');
@@ -545,7 +680,6 @@ export default function App() {
     }
 
     // Production backend mode:
-    // 1. Ensure conversation exists in PostgreSQL
     let currentSession = activeSession;
     let convId = currentSession?.conversationId;
 
@@ -565,7 +699,6 @@ export default function App() {
       setActiveNav('chats');
       setPromptValue('');
 
-      // 2. Persist user message in PostgreSQL (defer quota increment to completion endpoint)
       const savedUserMsg = await messagesApi.send(targetConvId, trimmed, 'user', true);
 
       const userChatMsg: ChatMessage = {
@@ -605,7 +738,6 @@ export default function App() {
         )
       );
 
-      // 3. Stream completion from POST /api/v1/chat/completions
       setIsStreaming(true);
       const abortController = new AbortController();
       streamAbortRef.current = abortController;
@@ -671,7 +803,6 @@ export default function App() {
             return;
           }
           setStreamError(err.message);
-          // Remove empty placeholder if no tokens arrived
           setSessions((prev) =>
             prev.map((s) =>
               s.id === targetSessionId
@@ -735,12 +866,14 @@ export default function App() {
         return 'Документы';
       case 'history':
         return 'История';
+      case 'quotas':
+        return 'Мои квоты';
       case 'admin':
-        return 'Админ-панель';
+        return canConfigureQuotas(user) ? 'Админ-панель' : 'Мои квоты';
       default:
         return 'Новый чат';
     }
-  }, [activeSession, activeCategory, activeNav]);
+  }, [activeSession, activeCategory, activeNav, user]);
 
   const showNewChatWelcome =
     activeNav === 'chats' && activeSession === null && activeCategoryId === null && !searchQuery.trim();
@@ -762,7 +895,7 @@ export default function App() {
     return (
       <LoginPage
         theme={theme}
-        onSelectTheme={setTheme}
+        onSelectTheme={handleSelectTheme}
         onLogin={handleLogin}
         onEnterDemoMode={handleEnterDemoMode}
       />
@@ -770,7 +903,7 @@ export default function App() {
   }
 
   return (
-    <div className="theme-transition h-screen overflow-hidden w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col md:p-4 lg:p-5">
+    <div className="h-screen overflow-hidden w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col md:p-4 lg:p-5">
       {/* WCAG Skip Link for Keyboard Users */}
       <a
         href="#main-workspace"
@@ -779,7 +912,7 @@ export default function App() {
         Перейти к основному содержимому
       </a>
 
-      {/* Outer Dashboard Frame matching the reference screenshot */}
+      {/* Outer Dashboard Frame */}
       <div className="flex-1 min-h-0 flex w-full max-w-[1440px] mx-auto md:rounded-[24px] overflow-hidden border border-[#E2E5EE] dark:border-slate-800/90 bg-white dark:bg-[#0E1322] shadow-[0_14px_44px_rgba(15,23,42,0.06)] dark:shadow-[0_14px_44px_rgba(0,0,0,0.45)] h-full">
         {/* Left Sidebar */}
         <Sidebar
@@ -804,6 +937,7 @@ export default function App() {
           quotas={quotas}
           onLogout={handleLogout}
           isDemoMode={isDemoMode}
+          onSwitchDemoRole={handleSwitchDemoRole}
           searchQuery={searchQuery}
           onSearchChange={(q) => {
             setSearchQuery(q);
@@ -823,10 +957,13 @@ export default function App() {
           <TopBar
             title={topBarTitle}
             theme={theme}
-            onSelectTheme={setTheme}
+            onSelectTheme={handleSelectTheme}
             onNewChat={handleNewChat}
             onOpenMobileMenu={() => setMobileMenuOpen(true)}
             exportSession={activeSession}
+            isDemoMode={isDemoMode}
+            userRole={user?.role}
+            onSwitchDemoRole={handleSwitchDemoRole}
           />
 
           <main
@@ -911,6 +1048,12 @@ export default function App() {
                 }}
                 onResetToNewChat={handleNewChat}
                 isDemoMode={isDemoMode}
+                user={user}
+                quotas={quotas}
+                persistedAdminUsers={adminUsers}
+                onUpdateAdminUsers={(updatedUsers) => {
+                  setAdminUsers(updatedUsers);
+                }}
               />
             )}
           </main>

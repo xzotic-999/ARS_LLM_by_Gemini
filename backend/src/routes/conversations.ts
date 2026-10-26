@@ -7,16 +7,37 @@ const router = Router();
 // All conversation routes require authentication.
 router.use(requireAuth);
 
-// GET /api/v1/conversations - list the current user's conversations
+// GET /api/v1/conversations - list the current user's conversations with messages
 router.get("/", async (req, res, next) => {
   try {
     const userId = req.user!.id;
 
     const result = await pool.query(
-      `SELECT id, title, created_at, last_message_at
-       FROM conversations
-       WHERE user_id = $1
-       ORDER BY last_message_at DESC, created_at DESC`,
+      `SELECT
+         c.id,
+         c.title,
+         c.created_at,
+         c.last_message_at,
+         COALESCE(
+           (
+             SELECT json_agg(
+               json_build_object(
+                 'id', m.id,
+                 'conversation_id', m.conversation_id,
+                 'role', m.role,
+                 'text', m.text,
+                 'created_at', m.created_at
+               )
+               ORDER BY m.created_at ASC, m.id ASC
+             )
+             FROM messages m
+             WHERE m.conversation_id = c.id
+           ),
+           '[]'::json
+         ) AS messages
+       FROM conversations c
+       WHERE c.user_id = $1
+       ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
       [userId]
     );
 

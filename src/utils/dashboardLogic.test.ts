@@ -319,3 +319,176 @@ test('OpenXML (.xlsx) attachment extractor parses sharedStrings and worksheet ro
   assert.ok(extracted.includes('Итого по отделу | 145000'));
 });
 
+test('Role-based quota permissions allow only admin to configure quotas while users can only view quotas', async () => {
+  const {
+    canConfigureQuotas,
+    canViewQuotas,
+    applyQuotaLimitChange,
+    DEFAULT_ADMIN_USERS,
+  } = await import('./dashboardLogic');
+  const { extractQuotaLimits } = await import('../services/api');
+
+  const adminUser = { id: 3, email: 'admin@ars_llm.local', name: 'Админ', role: 'admin' as const };
+  const regularUser = { id: 1, email: 'employee@company.kz', name: 'Сотрудник', role: 'user' as const };
+  const employeeRoleUser = { id: 2, email: 'dev@company.kz', name: 'Инженер', role: 'employee' as const };
+
+  // 1. Permission checks
+  assert.equal(canConfigureQuotas(adminUser), true);
+  assert.equal(canConfigureQuotas(regularUser), false);
+  assert.equal(canConfigureQuotas(employeeRoleUser), false);
+  assert.equal(canConfigureQuotas(null), false);
+
+  assert.equal(canViewQuotas(adminUser), true);
+  assert.equal(canViewQuotas(regularUser), true);
+  assert.equal(canViewQuotas(employeeRoleUser), true);
+  assert.equal(canViewQuotas(null), false);
+
+  // 2. Non-admin attempt to change quota is rejected
+  const deniedUpdate = applyQuotaLimitChange({
+    actor: regularUser,
+    users: DEFAULT_ADMIN_USERS,
+    targetUserId: 2,
+    dailyInput: '50',
+    monthlyInput: '1000',
+  });
+  assert.equal(deniedUpdate.ok, false);
+  if (!deniedUpdate.ok) {
+    assert.ok(deniedUpdate.error.includes('только администратор'));
+  }
+
+  // 3. Admin can update quota and invalid negative/non-integer limits are rejected
+  const invalidLimitUpdate = applyQuotaLimitChange({
+    actor: adminUser,
+    users: DEFAULT_ADMIN_USERS,
+    targetUserId: 2,
+    dailyInput: '-5',
+    monthlyInput: '500',
+  });
+  assert.equal(invalidLimitUpdate.ok, false);
+
+  const validAdminUpdate = applyQuotaLimitChange({
+    actor: adminUser,
+    users: DEFAULT_ADMIN_USERS,
+    targetUserId: 2,
+    dailyInput: '50',
+    monthlyInput: '1200',
+  });
+  assert.equal(validAdminUpdate.ok, true);
+  if (validAdminUpdate.ok) {
+    assert.equal(validAdminUpdate.updatedQuotas.daily.limit, 50);
+    assert.equal(validAdminUpdate.updatedQuotas.monthly.limit, 1200);
+  }
+
+  // 4. Quota payload normalization handles both nested and flat API shapes
+  const flatQuotas = extractQuotaLimits({
+    daily: { used: 5, limit: 25 },
+    monthly: { used: 40, limit: 500 },
+  });
+  assert.deepEqual(flatQuotas, {
+    daily: { used: 5, limit: 25 },
+    monthly: { used: 40, limit: 500 },
+  });
+
+  const nestedQuotas = extractQuotaLimits({
+    quotas: {
+      daily: { used: 7, limit: 30 },
+      monthly: { used: 55, limit: 600 },
+    },
+  });
+  assert.deepEqual(nestedQuotas, {
+    daily: { used: 7, limit: 30 },
+    monthly: { used: 55, limit: 600 },
+  });
+});
+
+test('Workspace state serialization and backend conversation mapping preserve chats across page refresh', async () => {
+  const {
+    serializeWorkspaceState,
+    deserializeWorkspaceState,
+    mapBackendConversationToSession,
+    INITIAL_SESSIONS,
+    INITIAL_CHAT_LISTS,
+    DEFAULT_ADMIN_USERS,
+    DEFAULT_MODEL_PARAMETERS,
+  } = await import('./dashboardLogic');
+
+  const customSession = {
+    id: 'sess-refresh-test',
+    title: 'Тестовый чат после обновления страницы',
+    categoryId: 'code',
+    updatedAt: 'Только что',
+    starred: true,
+    messages: [
+      {
+        id: 'm-1',
+        role: 'user' as const,
+        content: 'Сохрани этот диалог при F5',
+        timestamp: '14:20',
+      },
+      {
+        id: 'm-2',
+        role: 'assistant' as const,
+        content: 'Диалог сохранён и восстановится после перезагрузки.',
+        timestamp: '14:20',
+        isStreaming: true, // Should be sanitized to false on restore
+      },
+    ],
+  };
+
+  const rawJson = serializeWorkspaceState({
+    theme: 'dark',
+    isDemoMode: true,
+    demoRole: 'user',
+    sessions: [customSession, ...INITIAL_SESSIONS],
+    activeSessionId: 'sess-refresh-test',
+    activeNav: 'chats',
+    activeCategoryId: null,
+    chatLists: INITIAL_CHAT_LISTS,
+    adminUsers: DEFAULT_ADMIN_USERS,
+    modelParams: DEFAULT_MODEL_PARAMETERS,
+  });
+
+  const restored = deserializeWorkspaceState(rawJson);
+  assert.ok(restored);
+  assert.equal(restored.theme, 'dark');
+  assert.equal(restored.demoRole, 'user');
+  assert.equal(restored.activeSessionId, 'sess-refresh-test');
+  assert.equal(restored.sessions[0].id, 'sess-refresh-test');
+  assert.equal(restored.sessions[0].messages.length, 2);
+  assert.equal(restored.sessions[0].messages[1].isStreaming, false);
+
+  // Also verify mapBackendConversationToSession uses embedded conv.messages when messages argument is empty
+  const mappedFromEmbedded = mapBackendConversationToSession(
+    {
+      id: 99,
+      title: 'Чат из PostgreSQL при F5',
+      created_at: '2026-10-25T12:00:00.000Z',
+      last_message_at: '2026-10-25T12:05:00.000Z',
+      messages: [
+        {
+          id: 501,
+          conversation_id: 99,
+          role: 'user',
+          text: 'Привет после рефреша!',
+          created_at: '2026-10-25T12:01:00.000Z',
+        },
+        {
+          id: 502,
+          conversation_id: 99,
+          role: 'assistant',
+          text: 'История загружена сразу со списком чатов.',
+          created_at: '2026-10-25T12:02:00.000Z',
+        },
+      ],
+    },
+    []
+  );
+  assert.equal(mappedFromEmbedded.messages.length, 2);
+  assert.equal(mappedFromEmbedded.messages[0].content, 'Привет после рефреша!');
+  assert.equal(
+    mappedFromEmbedded.messages[1].content,
+    'История загружена сразу со списком чатов.'
+  );
+});
+
+

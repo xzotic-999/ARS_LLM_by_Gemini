@@ -10,10 +10,11 @@ export const ArsLogo: React.FC<ArsLogoProps> = ({ collapsed = false }) => {
   const gradLeftId = `ars-grad-left-${uid}`;
   const gradRightId = `ars-grad-right-${uid}`;
   const gradBarId = `ars-grad-bar-${uid}`;
+  const cutoutMaskId = `ars-cutout-${uid}`;
 
   return (
     <div className="flex items-center gap-3 select-none">
-      {/* Geometric faceted 'A' mark matching the ARS LLM reference */}
+      {/* Geometric faceted 'A' mark with true negative-space mask cutout */}
       <svg
         width="32"
         height="32"
@@ -36,15 +37,19 @@ export const ArsLogo: React.FC<ArsLogoProps> = ({ collapsed = false }) => {
             <stop offset="0%" stopColor="#818CF8" />
             <stop offset="100%" stopColor="#4F46E5" />
           </linearGradient>
+          <mask id={cutoutMaskId}>
+            <rect x="0" y="0" width="36" height="36" fill="white" />
+            <path d="M18 13.5L13.5 24H22.5L18 13.5Z" fill="black" />
+          </mask>
         </defs>
-        {/* Left outer facet */}
-        <path d="M18 3L4 31H11.5L18 14.5V3Z" fill={`url(#${gradLeftId})`} />
-        {/* Right outer facet */}
-        <path d="M18 3L32 31H24.5L18 14.5V3Z" fill={`url(#${gradRightId})`} />
-        {/* Inner lower prism cross-facet */}
-        <path d="M12.5 23.5L18 19L23.5 23.5L26.5 31H9.5L12.5 23.5Z" fill={`url(#${gradBarId})`} opacity="0.9" />
-        {/* Center negative-space triangle */}
-        <path d="M18 13.5L13.5 24H22.5L18 13.5Z" className="fill-[#FAFAFC] dark:fill-[#111524]" />
+        <g mask={`url(#${cutoutMaskId})`}>
+          {/* Left outer facet */}
+          <path d="M18 3L4 31H11.5L18 14.5V3Z" fill={`url(#${gradLeftId})`} />
+          {/* Right outer facet */}
+          <path d="M18 3L32 31H24.5L18 14.5V3Z" fill={`url(#${gradRightId})`} />
+          {/* Inner lower prism cross-facet */}
+          <path d="M12.5 23.5L18 19L23.5 23.5L26.5 31H9.5L12.5 23.5Z" fill={`url(#${gradBarId})`} opacity="0.9" />
+        </g>
       </svg>
       {!collapsed && (
         <span className="text-[18px] font-bold tracking-tight text-[#111827] dark:text-slate-100 whitespace-nowrap">

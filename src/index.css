@@ -72,14 +72,46 @@
   background-color: rgba(99, 102, 241, 0.65);
 }
 
-/* Smooth theme transitions respecting reduced-motion preferences */
-@media (prefers-reduced-motion: no-preference) {
-  .theme-transition,
-  .theme-transition * {
-    transition-property: background-color, border-color, color, fill, stroke, box-shadow, transform, opacity;
-    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
-    transition-duration: 180ms;
+/* Atomic theme switch: suppress per-element border/background lag so contours never flash */
+html.theme-switching,
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+  animation-duration: 0s !important;
+}
+
+@keyframes ars-view-transition-in {
+  from {
+    opacity: 0;
   }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes ars-view-transition-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  mix-blend-mode: normal;
+}
+
+::view-transition-old(root) {
+  animation-name: ars-view-transition-out;
+}
+
+::view-transition-new(root) {
+  animation-name: ars-view-transition-in;
 }
 
 /* High-visibility keyboard focus ring (WCAG 2.4.7 / 2.4.11) */

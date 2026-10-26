@@ -90,7 +90,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       aria-label="Создание нового сообщения"
       className={`w-full ${
         compact ? 'max-w-[820px] p-3 rounded-[18px]' : 'max-w-[680px] p-4 rounded-[20px]'
-      } mx-auto border border-[#E2E5EE] dark:border-slate-800 bg-white dark:bg-[#131829] shadow-[0_8px_30px_rgba(15,23,42,0.06)] dark:shadow-[0_8px_30px_rgba(0,0,0,0.35)] transition-shadow focus-within:border-indigo-400 dark:focus-within:border-indigo-500/80`}
+      } mx-auto border border-[#E2E5EE] dark:border-slate-800 bg-white dark:bg-[#131829] shadow-[0_8px_30px_rgba(15,23,42,0.06)] dark:shadow-[0_8px_30px_rgba(0,0,0,0.35)] focus-within:border-indigo-400 dark:focus-within:border-indigo-500/80`}
     >
       {/* Floating Input Bar Textarea Zone (Report 1: no outer card wrapper or duplicate 'Начать новый чат' heading) */}
       <div className="relative">

@@ -1,6 +1,13 @@
 export type ThemeMode = 'light' | 'dark';
 
-export type NavSectionId = 'chats' | 'projects' | 'templates' | 'documents' | 'history' | 'admin';
+export type NavSectionId =
+  | 'chats'
+  | 'projects'
+  | 'templates'
+  | 'documents'
+  | 'history'
+  | 'quotas'
+  | 'admin';
 
 export interface ChatListCategory {
   id: string;
@@ -687,34 +694,338 @@ export function formatTimestampShort(isoString?: string | null): string {
 
 /**
  * Maps a backend ConversationRecord and optional MessageRecord[] into a UI ChatSession.
+ * Preserves existing cached messages when messages array is not explicitly supplied.
  */
 export function mapBackendConversationToSession(
-  conv: { id: number; title: string | null; created_at: string; last_message_at: string | null },
-  messages: Array<{
+  conv: {
+    id: number;
+    title: string | null;
+    created_at: string;
+    last_message_at: string | null;
+    messages?: Array<{
+      id: number;
+      conversation_id: number;
+      role: 'user' | 'assistant' | 'system';
+      text: string;
+      created_at: string;
+    }>;
+  },
+  messages?: Array<{
     id: number;
     conversation_id: number;
     role: 'user' | 'assistant' | 'system';
     text: string;
     created_at: string;
-  }> = [],
+  }>,
   existingSession?: ChatSession | null
 ): ChatSession {
-  const mappedMessages: ChatMessage[] = messages
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => ({
-      id: `db-msg-${m.id}`,
-      role: m.role as 'user' | 'assistant',
-      content: m.text,
-      timestamp: formatTimestampShort(m.created_at),
-    }));
+  const sourceMessages = messages && messages.length > 0 ? messages : conv.messages;
+  const mappedMessages: ChatMessage[] =
+    sourceMessages && sourceMessages.length > 0
+      ? sourceMessages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({
+            id: `db-msg-${m.id}`,
+            role: m.role as 'user' | 'assistant',
+            content: m.text,
+            timestamp: formatTimestampShort(m.created_at),
+          }))
+      : existingSession?.messages ?? [];
 
   return {
     id: `conv-${conv.id}`,
     conversationId: conv.id,
-    title: conv.title?.trim() || `Диалог #${conv.id}`,
+    title: conv.title?.trim() || existingSession?.title || `Диалог #${conv.id}`,
     categoryId: existingSession?.categoryId ?? 'code',
     updatedAt: formatTimestampShort(conv.last_message_at || conv.created_at),
     starred: existingSession?.starred ?? false,
     messages: mappedMessages,
   };
 }
+
+/**
+ * RBAC rule 1: Only administrators can configure or edit user quotas.
+ */
+export function canConfigureQuotas(
+  user: { role?: string | null } | null | undefined
+): boolean {
+  return Boolean(user && user.role === 'admin');
+}
+
+/**
+ * RBAC rule 2: Regular users (and admins) can view their quota usage.
+ */
+export function canViewQuotas(
+  user: { role?: string | null } | null | undefined
+): boolean {
+  if (!user || !user.role) return false;
+  return user.role === 'admin' || user.role === 'user' || user.role === 'employee';
+}
+
+export interface QuotaUpdateTargetUser {
+  id: number;
+  email: string;
+  name?: string;
+  role: 'user' | 'employee' | 'admin';
+  created_at: string;
+  quotas: {
+    daily: { used: number; limit: number | null };
+    monthly: { used: number; limit: number | null };
+  };
+}
+
+/**
+ * Validates and applies a quota limit change. Enforces that only an admin actor can modify limits.
+ */
+export function applyQuotaLimitChange(params: {
+  actor: { role?: string | null } | null | undefined;
+  users: QuotaUpdateTargetUser[];
+  targetUserId: number;
+  dailyInput: string;
+  monthlyInput: string;
+}):
+  | {
+      ok: true;
+      users: QuotaUpdateTargetUser[];
+      updatedQuotas: {
+        daily: { used: number; limit: number | null };
+        monthly: { used: number; limit: number | null };
+      };
+    }
+  | { ok: false; error: string } {
+  if (!canConfigureQuotas(params.actor)) {
+    return {
+      ok: false,
+      error: 'Недостаточно прав: настраивать квоты может только администратор.',
+    };
+  }
+
+  const dailyTrimmed = params.dailyInput.trim();
+  const monthlyTrimmed = params.monthlyInput.trim();
+
+  const dailyLimit = dailyTrimmed === '' ? null : Number(dailyTrimmed);
+  const monthlyLimit = monthlyTrimmed === '' ? null : Number(monthlyTrimmed);
+
+  if (
+    (dailyLimit !== null && (!Number.isInteger(dailyLimit) || dailyLimit < 0)) ||
+    (monthlyLimit !== null && (!Number.isInteger(monthlyLimit) || monthlyLimit < 0))
+  ) {
+    return {
+      ok: false,
+      error: 'Лимиты должны быть неотрицательными целыми числами (или пустыми для безлимита).',
+    };
+  }
+
+  const target = params.users.find((u) => u.id === params.targetUserId);
+  if (!target) {
+    return { ok: false, error: 'Пользователь не найден.' };
+  }
+
+  const updatedQuotas = {
+    daily: { ...target.quotas.daily, limit: dailyLimit },
+    monthly: { ...target.quotas.monthly, limit: monthlyLimit },
+  };
+
+  const updatedUsers = params.users.map((u) =>
+    u.id === params.targetUserId ? { ...u, quotas: updatedQuotas } : u
+  );
+
+  return {
+    ok: true,
+    users: updatedUsers,
+    updatedQuotas,
+  };
+}
+
+export interface PersistedWorkspaceState {
+  theme: ThemeMode;
+  isDemoMode: boolean;
+  demoRole: 'admin' | 'user';
+  sessions: ChatSession[];
+  activeSessionId: string | null;
+  activeNav: NavSectionId;
+  activeCategoryId: string | null;
+  chatLists: ChatListCategory[];
+  adminUsers: QuotaUpdateTargetUser[];
+  modelParams: ModelParameters;
+}
+
+export const WORKSPACE_STORAGE_KEY = 'ars_llm_workspace_state_v2';
+
+export const DEFAULT_ADMIN_USERS: QuotaUpdateTargetUser[] = [
+  {
+    id: 1,
+    email: 'admin@ars_llm.local',
+    name: 'Администратор ИТ',
+    role: 'admin',
+    created_at: '2026-10-01T08:00:00.000Z',
+    quotas: { daily: { used: 4, limit: 100 }, monthly: { used: 38, limit: 2000 } },
+  },
+  {
+    id: 2,
+    email: 'employee@company.kz',
+    name: 'Сотрудник',
+    role: 'user',
+    created_at: '2026-10-05T09:30:00.000Z',
+    quotas: { daily: { used: 4, limit: 20 }, monthly: { used: 38, limit: 500 } },
+  },
+];
+
+/**
+ * Cleans up persisted chat sessions so any interrupted stream is marked finished on reload.
+ */
+export function sanitizePersistedSessions(sessions: ChatSession[]): ChatSession[] {
+  if (!Array.isArray(sessions)) return INITIAL_SESSIONS;
+  return sessions
+    .filter((s) => s && typeof s.id === 'string' && typeof s.title === 'string')
+    .map((s) => ({
+      ...s,
+      messages: Array.isArray(s.messages)
+        ? s.messages
+            .filter(
+              (m) =>
+                m &&
+                (m.role === 'user' || m.role === 'assistant') &&
+                typeof m.content === 'string' &&
+                (m.content.trim().length > 0 || !m.isStreaming)
+            )
+            .map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m))
+        : [],
+    }));
+}
+
+/**
+ * Serializes workspace state to JSON for localStorage persistence across page reloads.
+ */
+export function serializeWorkspaceState(state: PersistedWorkspaceState): string {
+  const cleanState: PersistedWorkspaceState = {
+    ...state,
+    sessions: sanitizePersistedSessions(state.sessions),
+  };
+  return JSON.stringify(cleanState);
+}
+
+/**
+ * Deserializes workspace state from JSON, returning null if invalid or absent.
+ */
+export function deserializeWorkspaceState(
+  rawJson: string | null | undefined
+): PersistedWorkspaceState | null {
+  if (!rawJson || typeof rawJson !== 'string') return null;
+  try {
+    const parsed = JSON.parse(rawJson) as Partial<PersistedWorkspaceState>;
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const theme: ThemeMode = parsed.theme === 'dark' ? 'dark' : 'light';
+    const demoRole: 'admin' | 'user' = parsed.demoRole === 'admin' ? 'admin' : 'user';
+    const isDemoMode = Boolean(parsed.isDemoMode);
+    const sessions = Array.isArray(parsed.sessions)
+      ? sanitizePersistedSessions(parsed.sessions)
+      : INITIAL_SESSIONS;
+
+    const validNavs: NavSectionId[] = [
+      'chats',
+      'projects',
+      'templates',
+      'documents',
+      'history',
+      'quotas',
+      'admin',
+    ];
+    let activeNav: NavSectionId =
+      parsed.activeNav && validNavs.includes(parsed.activeNav) ? parsed.activeNav : 'chats';
+
+    // Enforce RBAC on reload: non-admin cannot stay on 'admin' nav
+    if (isDemoMode && demoRole !== 'admin' && activeNav === 'admin') {
+      activeNav = 'quotas';
+    }
+
+    const activeSessionId =
+      typeof parsed.activeSessionId === 'string' &&
+      sessions.some((s) => s.id === parsed.activeSessionId)
+        ? parsed.activeSessionId
+        : null;
+
+    const chatLists =
+      Array.isArray(parsed.chatLists) && parsed.chatLists.length > 0
+        ? parsed.chatLists
+        : INITIAL_CHAT_LISTS;
+
+    const adminUsers =
+      Array.isArray(parsed.adminUsers) && parsed.adminUsers.length > 0
+        ? parsed.adminUsers
+        : DEFAULT_ADMIN_USERS;
+
+    const modelParams =
+      parsed.modelParams && validateModelParameters(parsed.modelParams).valid
+        ? parsed.modelParams
+        : DEFAULT_MODEL_PARAMETERS;
+
+    return {
+      theme,
+      isDemoMode,
+      demoRole,
+      sessions,
+      activeSessionId,
+      activeNav,
+      activeCategoryId: typeof parsed.activeCategoryId === 'string' ? parsed.activeCategoryId : null,
+      chatLists,
+      adminUsers,
+      modelParams,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Transitions the document theme smoothly without per-element border/contour flashing.
+ * Uses the View Transitions API when available and locks out individual element transitions during the DOM flip.
+ */
+export function applyThemeWithSmoothTransition(
+  nextTheme: ThemeMode,
+  onApplyState: (mode: ThemeMode) => void
+): void {
+  if (typeof document === 'undefined') {
+    onApplyState(nextTheme);
+    return;
+  }
+
+  const root = document.documentElement;
+  const applyDomTheme = () => {
+    root.classList.add('theme-switching');
+    if (nextTheme === 'dark') {
+      root.classList.add('dark');
+    } else {
+      root.classList.remove('dark');
+    }
+    onApplyState(nextTheme);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        root.classList.remove('theme-switching');
+      });
+    });
+  };
+
+  const docWithTransition = document as Document & {
+    startViewTransition?: (cb: () => void) => { finished: Promise<void> };
+  };
+
+  const prefersReducedMotion =
+    typeof window !== 'undefined' &&
+    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+  if (typeof docWithTransition.startViewTransition === 'function' && !prefersReducedMotion) {
+    try {
+      docWithTransition.startViewTransition(() => {
+        applyDomTheme();
+      });
+      return;
+    } catch {
+      // Fallback to direct atomic DOM flip
+    }
+  }
+
+  applyDomTheme();
+}
+

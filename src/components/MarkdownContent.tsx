@@ -223,7 +223,7 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
         elements.push(
           <blockquote
             key={`bq-${segIdx}-${startIdx}`}
-            className="my-2 pl-3.5 border-l-2 border-indigo-500 dark:border-indigo-400 text-slate-600 dark:text-slate-300 italic"
+            className="my-2 px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 text-slate-600 dark:text-slate-300 italic"
           >
             {renderInlineMarkdown(quoteLines.join(' '), `bq-${segIdx}-${startIdx}`)}
           </blockquote>

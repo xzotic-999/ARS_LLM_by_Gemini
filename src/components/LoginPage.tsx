@@ -8,7 +8,7 @@ interface LoginPageProps {
   theme: ThemeMode;
   onSelectTheme: (mode: ThemeMode) => void;
   onLogin: (email: string, password: string) => Promise<void>;
-  onEnterDemoMode: () => void;
+  onEnterDemoMode: (role?: 'admin' | 'user') => void;
   initialError?: string | null;
 }
 
@@ -53,7 +53,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   };
 
   return (
-    <div className="theme-transition min-h-screen w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col justify-between p-4 md:p-6">
+    <div className="min-h-screen w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col justify-between p-4 md:p-6">
       {/* Top Bar with Logo and Theme Switcher */}
       <header className="w-full max-w-[1200px] mx-auto flex items-center justify-between py-2">
         <ArsLogo />
@@ -67,7 +67,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             aria-pressed={theme === 'light'}
             aria-label="Светлая тема"
             onClick={() => onSelectTheme('light')}
-            className={`focus-ring w-9 h-7 rounded-full flex items-center justify-center transition-all ${
+            className={`focus-ring w-9 h-7 rounded-full flex items-center justify-center ${
               theme === 'light'
                 ? 'bg-[#EEF1F7] text-[#4F46E5] shadow-xs'
                 : 'text-[#6B7280] dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -80,7 +80,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             aria-pressed={theme === 'dark'}
             aria-label="Тёмная тема"
             onClick={() => onSelectTheme('dark')}
-            className={`focus-ring w-9 h-7 rounded-full flex items-center justify-center transition-all ${
+            className={`focus-ring w-9 h-7 rounded-full flex items-center justify-center ${
               theme === 'dark'
                 ? 'bg-[#1E253B] text-indigo-300 shadow-xs'
                 : 'text-[#6B7280] dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -134,7 +134,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   }}
                   placeholder="admin@ars_llm.local"
                   disabled={submitting}
-                  className="focus-ring w-full h-[42px] pl-10 pr-3.5 rounded-xl border border-[#E5E7EB] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-[#131829] text-[14px] text-[#111827] dark:text-slate-100 placeholder:text-[#9CA3AF] dark:placeholder:text-slate-500 transition-colors"
+                  className="focus-ring w-full h-[42px] pl-10 pr-3.5 rounded-xl border border-[#E5E7EB] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-[#131829] text-[14px] text-[#111827] dark:text-slate-100 placeholder:text-[#9CA3AF] dark:placeholder:text-slate-500"
                 />
               </div>
             </div>
@@ -162,7 +162,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                   }}
                   placeholder="••••••••"
                   disabled={submitting}
-                  className="focus-ring w-full h-[42px] pl-10 pr-3.5 rounded-xl border border-[#E5E7EB] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-[#131829] text-[14px] text-[#111827] dark:text-slate-100 placeholder:text-[#9CA3AF] dark:placeholder:text-slate-500 transition-colors"
+                  className="focus-ring w-full h-[42px] pl-10 pr-3.5 rounded-xl border border-[#E5E7EB] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-[#131829] text-[14px] text-[#111827] dark:text-slate-100 placeholder:text-[#9CA3AF] dark:placeholder:text-slate-500"
                 />
               </div>
             </div>
@@ -179,7 +179,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
             <button
               type="submit"
               disabled={submitting}
-              className="focus-ring w-full h-[44px] rounded-xl bg-[#5046E5] hover:bg-[#4338CA] active:bg-[#3730A3] disabled:opacity-60 text-white text-[14px] font-semibold flex items-center justify-center gap-2 shadow-xs transition-colors"
+              className="focus-ring w-full h-[44px] rounded-xl bg-[#5046E5] hover:bg-[#4338CA] active:bg-[#3730A3] disabled:opacity-60 text-white text-[14px] font-semibold flex items-center justify-center gap-2 shadow-xs"
             >
               <span>{submitting ? 'Выполняется вход...' : 'Войти в рабочую область'}</span>
               <ArrowRight className="w-4 h-4" aria-hidden="true" />
@@ -188,16 +188,29 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           <div className="my-5 border-t border-[#E6E8F0] dark:border-slate-800/90" role="separator" />
 
-          <div className="space-y-2.5">
-            <button
-              type="button"
-              onClick={onEnterDemoMode}
-              className="focus-ring w-full h-[40px] px-3.5 rounded-xl border border-[#E2E5EE] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-slate-800/60 hover:bg-slate-100 dark:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200 text-[13px] font-medium flex items-center justify-center gap-2 transition-colors"
-            >
-              <Eye className="w-4 h-4 text-[#4F46E5] dark:text-indigo-400" aria-hidden="true" />
-              <span>Предпросмотр интерфейса (Автономный демо-режим)</span>
-            </button>
-            <p className="text-[11.5px] text-center text-[#6B7280] dark:text-slate-400">
+          <div className="space-y-2">
+            <div className="text-[11.5px] font-semibold text-[#6B7280] dark:text-slate-400 text-center">
+              Демо-режим для презентации
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => onEnterDemoMode('user')}
+                className="focus-ring h-[40px] px-3 rounded-xl border border-[#E2E5EE] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-slate-800/60 hover:bg-slate-100 dark:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200 text-[12.5px] font-medium flex items-center justify-center gap-1.5 whitespace-nowrap"
+              >
+                <Eye className="w-3.5 h-3.5 text-[#4F46E5] dark:text-indigo-400 shrink-0" aria-hidden="true" />
+                <span>Сотрудник (просмотр квот)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onEnterDemoMode('admin')}
+                className="focus-ring h-[40px] px-3 rounded-xl border border-[#E2E5EE] dark:border-slate-700/90 bg-[#FAFAFC] dark:bg-slate-800/60 hover:bg-slate-100 dark:hover:bg-slate-800 text-[#1F2937] dark:text-slate-200 text-[12.5px] font-medium flex items-center justify-center gap-1.5 whitespace-nowrap"
+              >
+                <Lock className="w-3.5 h-3.5 text-[#4F46E5] dark:text-indigo-400 shrink-0" aria-hidden="true" />
+                <span>Админ (настройка квот)</span>
+              </button>
+            </div>
+            <p className="text-[11.5px] text-center text-[#6B7280] dark:text-slate-400 pt-0.5">
               Авторизация выполняется через защищённую сессию PostgreSQL (HttpOnly cookie).
             </p>
           </div>

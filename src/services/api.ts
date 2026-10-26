@@ -3,11 +3,13 @@ export interface QuotaLimits {
   monthly: { used: number; limit: number | null };
 }
 
+export type UserRole = 'user' | 'employee' | 'admin';
+
 export interface UserProfile {
   id: number;
   email: string;
   name?: string;
-  role: 'user' | 'admin';
+  role: UserRole;
   quotas?: QuotaLimits;
 }
 
@@ -16,6 +18,7 @@ export interface ConversationRecord {
   title: string | null;
   created_at: string;
   last_message_at: string | null;
+  messages?: MessageRecord[];
 }
 
 export interface MessageRecord {
@@ -29,7 +32,8 @@ export interface MessageRecord {
 export interface AdminUserRecord {
   id: number;
   email: string;
-  role: 'user' | 'admin';
+  name?: string;
+  role: UserRole;
   created_at: string;
   quotas: QuotaLimits;
 }
@@ -186,21 +190,70 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return data as T;
 }
 
+export function extractQuotaLimits(payload: unknown): QuotaLimits | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as Record<string, unknown>;
+  const candidate = (obj.quotas && typeof obj.quotas === 'object' ? obj.quotas : obj) as Record<
+    string,
+    unknown
+  >;
+  if (
+    candidate.daily &&
+    typeof candidate.daily === 'object' &&
+    candidate.monthly &&
+    typeof candidate.monthly === 'object'
+  ) {
+    const daily = candidate.daily as { used?: unknown; limit?: unknown };
+    const monthly = candidate.monthly as { used?: unknown; limit?: unknown };
+    return {
+      daily: {
+        used: typeof daily.used === 'number' ? daily.used : 0,
+        limit: typeof daily.limit === 'number' ? daily.limit : null,
+      },
+      monthly: {
+        used: typeof monthly.used === 'number' ? monthly.used : 0,
+        limit: typeof monthly.limit === 'number' ? monthly.limit : null,
+      },
+    };
+  }
+  return null;
+}
+
 export const authApi = {
-  login: (email: string, password: string) =>
-    request<{ user: UserProfile }>('/auth/login', {
+  login: async (email: string, password: string) => {
+    const raw = await request<{ user: UserProfile; quotas?: QuotaLimits }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email: email.trim(), password }),
-    }),
+    });
+    const quotas = extractQuotaLimits(raw) ?? raw.user?.quotas ?? undefined;
+    return {
+      user: quotas ? { ...raw.user, quotas } : raw.user,
+      quotas,
+    };
+  },
 
   logout: () =>
     request<{ ok: boolean }>('/auth/logout', {
       method: 'POST',
     }),
 
-  me: () => request<{ user: UserProfile }>('/auth/me'),
+  me: async () => {
+    const raw = await request<{ user: UserProfile; quotas?: QuotaLimits }>('/auth/me');
+    const quotas = extractQuotaLimits(raw) ?? raw.user?.quotas ?? undefined;
+    return {
+      user: quotas ? { ...raw.user, quotas } : raw.user,
+      quotas,
+    };
+  },
 
-  quotas: () => request<{ quotas: QuotaLimits }>('/auth/quotas'),
+  quotas: async (): Promise<{ quotas: QuotaLimits }> => {
+    const raw = await request<unknown>('/auth/quotas');
+    const quotas = extractQuotaLimits(raw);
+    if (!quotas) {
+      throw new Error('Invalid quota response format');
+    }
+    return { quotas };
+  },
 };
 
 export const conversationsApi = {
