@@ -438,7 +438,7 @@ export function filterWorkspaceContent(params: {
   });
 
   return {
-    sessions: filteredSessions,
+    sessions: deduplicateSessions(filteredSessions),
     templates: filteredTemplates,
     documents: filteredDocuments,
     totalMatches: filteredSessions.length + filteredTemplates.length + filteredDocuments.length,
@@ -875,11 +875,30 @@ export const DEFAULT_ADMIN_USERS: QuotaUpdateTargetUser[] = [
 ];
 
 /**
- * Cleans up persisted chat sessions so any interrupted stream is marked finished on reload.
+ * Ensures an array of chat sessions contains strictly unique IDs, preserving the first (latest) occurrence.
+ */
+export function deduplicateSessions(sessions: ChatSession[]): ChatSession[] {
+  if (!Array.isArray(sessions)) return [];
+  const seen = new Set<string>();
+  const unique: ChatSession[] = [];
+  for (const sess of sessions) {
+    if (!sess || typeof sess.id !== 'string') continue;
+    if (!seen.has(sess.id)) {
+      seen.add(sess.id);
+      unique.push(sess);
+    }
+  }
+  return unique;
+}
+
+/**
+ * Cleans up persisted chat sessions so any interrupted stream is marked finished on reload,
+ * and ensures no duplicate session IDs exist.
  */
 export function sanitizePersistedSessions(sessions: ChatSession[]): ChatSession[] {
   if (!Array.isArray(sessions)) return INITIAL_SESSIONS;
-  return sessions
+  const uniqueSessions = deduplicateSessions(sessions);
+  return uniqueSessions
     .filter((s) => s && typeof s.id === 'string' && typeof s.title === 'string')
     .map((s) => ({
       ...s,

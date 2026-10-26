@@ -23,6 +23,7 @@ import {
   ChatSession,
   NavSectionId,
   canConfigureQuotas,
+  deduplicateSessions,
 } from '../utils/dashboardLogic';
 import { QuotaLimits, UserProfile } from '../services/api';
 
@@ -397,7 +398,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
               НЕДАВНИЕ ДИАЛОГИ
             </div>
-            {sessions.slice(0, 8).map((sess) => {
+            {deduplicateSessions(sessions).slice(0, 8).map((sess) => {
               const isCurrent = activeSessionId === sess.id;
               const isEditing = editingSessionId === sess.id;
 

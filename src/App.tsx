@@ -39,6 +39,7 @@ import {
   applyThemeWithSmoothTransition,
   canConfigureQuotas,
   createCustomChatList,
+  deduplicateSessions,
   deserializeWorkspaceState,
   evaluateQuotaBlockStatus,
   filterWorkspaceContent,
@@ -157,7 +158,7 @@ export default function App() {
   );
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
     if (initialPersisted?.sessions && initialPersisted.sessions.length > 0) {
-      return initialPersisted.sessions;
+      return deduplicateSessions(initialPersisted.sessions);
     }
     return initialDemoActive ? INITIAL_SESSIONS : [];
   });
@@ -301,7 +302,7 @@ export default function App() {
       const list = await conversationsApi.list();
       setSessions((prev) => {
         if (list.length === 0) {
-          return prev;
+          return deduplicateSessions(prev);
         }
         const prevById = new Map(prev.map((s) => [s.id, s]));
         const mappedFromBackend = list.map((conv) => {
@@ -314,7 +315,7 @@ export default function App() {
         });
         const backendIds = new Set(mappedFromBackend.map((s) => s.id));
         const localOnly = prev.filter((s) => !backendIds.has(s.id));
-        return [...mappedFromBackend, ...localOnly];
+        return deduplicateSessions([...mappedFromBackend, ...localOnly]);
       });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -610,7 +611,7 @@ export default function App() {
           prev.map((s) => (s.id === targetSessionId ? updatedSession : s))
         );
       } else {
-        setSessions((prev) => [updatedSession, ...prev]);
+        setSessions((prev) => deduplicateSessions([updatedSession, ...prev]));
         setActiveSessionId(targetSessionId);
       }
 
@@ -752,7 +753,7 @@ export default function App() {
         convId = createdConv.id;
         currentSession = mapBackendConversationToSession(createdConv, []);
         currentSession.categoryId = activeCategoryId ?? 'code';
-        setSessions((prev) => [currentSession!, ...prev]);
+        setSessions((prev) => deduplicateSessions([currentSession!, ...prev]));
         setActiveSessionId(currentSession.id);
       }
 
@@ -914,6 +915,49 @@ export default function App() {
       lastSubmittedPrompt.attachments,
       lastSubmittedPrompt.attachmentDetails
     );
+  };
+
+  const handleRegenerateResponse = (assistantMessageId: string) => {
+    if (isStreaming || quotaBlockStatus.isBlocked || !activeSession) return;
+    const msgIdx = activeSession.messages.findIndex((m) => m.id === assistantMessageId);
+    if (msgIdx <= 0) {
+      if (lastSubmittedPrompt) {
+        handleRetryLastPrompt();
+      }
+      return;
+    }
+    const precedingUserMsg = [...activeSession.messages.slice(0, msgIdx)]
+      .reverse()
+      .find((m) => m.role === 'user');
+    if (!precedingUserMsg) return;
+
+    const prunedMessages = activeSession.messages.slice(0, msgIdx);
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSession.id ? { ...s, messages: prunedMessages } : s
+      )
+    );
+
+    handleSubmitPrompt(
+      precedingUserMsg.content,
+      precedingUserMsg.attachments ?? []
+    );
+  };
+
+  const handleEditUserPrompt = (userMessageId: string, newContent: string) => {
+    if (isStreaming || quotaBlockStatus.isBlocked || !activeSession) return;
+    const msgIdx = activeSession.messages.findIndex((m) => m.id === userMessageId);
+    if (msgIdx === -1) return;
+
+    const existingMsg = activeSession.messages[msgIdx];
+    const prunedMessages = activeSession.messages.slice(0, msgIdx);
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === activeSession.id ? { ...s, messages: prunedMessages } : s
+      )
+    );
+
+    handleSubmitPrompt(newContent, existingMsg.attachments ?? []);
   };
 
   const handleSelectQuickPrompt = (qp: QuickPrompt) => {
@@ -1099,6 +1143,8 @@ export default function App() {
                 onAbortStream={handleAbortStream}
                 streamError={streamError}
                 onRetryLastPrompt={lastSubmittedPrompt ? handleRetryLastPrompt : undefined}
+                onRegenerateResponse={handleRegenerateResponse}
+                onEditUserPrompt={handleEditUserPrompt}
                 quotaBlockStatus={quotaBlockStatus}
                 onOpenQuotasView={handleOpenQuotasView}
               />

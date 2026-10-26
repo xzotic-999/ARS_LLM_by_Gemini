@@ -25,6 +25,7 @@ import {
   PromptTemplate,
   applyQuotaLimitChange,
   canConfigureQuotas,
+  deduplicateSessions,
   validateModelParameters,
   validateProfileUpdate,
 } from '../utils/dashboardLogic';
@@ -717,7 +718,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
         </div>
       ) : (
         <div className="space-y-3">
-          {sessions.map((sess) => (
+          {deduplicateSessions(sessions).map((sess) => (
             <div
               key={sess.id}
               className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 flex items-center justify-between gap-4 transition-colors"
@@ -1063,9 +1064,9 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({
         <div className="mt-3 overflow-y-auto modal-scroll-thin space-y-3">
           <div>
             <div className="text-[11px] font-semibold uppercase text-slate-400 px-2 mb-1">
-              Недавние чаты ({sessions.length})
+              Недавние чаты ({deduplicateSessions(sessions).length})
             </div>
-            {sessions.map((s) => (
+            {deduplicateSessions(sessions).map((s) => (
               <button
                 key={s.id}
                 type="button"

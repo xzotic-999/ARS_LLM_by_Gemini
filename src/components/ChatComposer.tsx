@@ -8,6 +8,7 @@ import {
   Send,
   X,
   AlertCircle,
+  Square,
 } from 'lucide-react';
 import {
   AttachedFileItem,
@@ -30,6 +31,8 @@ interface ChatComposerProps {
   disabled?: boolean;
   quotaBlockStatus?: QuotaBlockStatus | null;
   onOpenQuotasView?: () => void;
+  isStreaming?: boolean;
+  onAbortStream?: () => void;
 }
 
 export const ChatComposer: React.FC<ChatComposerProps> = ({
@@ -42,6 +45,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   disabled = false,
   quotaBlockStatus = null,
   onOpenQuotasView,
+  isStreaming = false,
+  onAbortStream,
 }) => {
   const [attachments, setAttachments] = useState<AttachedFileItem[]>([]);
   const [isRecordingVoice, setIsRecordingVoice] = useState(false);
@@ -55,6 +60,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
   const isQuotaBlocked = Boolean(quotaBlockStatus?.isBlocked);
   const effectiveDisabled = disabled || isQuotaBlocked;
   const hasText = promptValue.trim().length > 0;
+  const canSubmit = (hasText || attachments.length > 0) && !effectiveDisabled;
 
   useEffect(() => {
     if (!actionsPopoverOpen) return;
@@ -99,14 +105,19 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
 
   const triggerSubmit = () => {
     if (effectiveDisabled) return;
-    if (!promptValue.trim()) {
+    const effectivePrompt =
+      promptValue.trim() ||
+      (attachments.length > 0
+        ? `Проанализируй прикреплённый документ (${attachments.map((a) => a.name).join(', ')}) и представь основные данные.`
+        : '');
+    if (!effectivePrompt) {
       setComposerError('Введите сообщение или выберите быстрый запрос');
       return;
     }
     setComposerError(null);
     setActionsPopoverOpen(false);
     onSubmitPrompt(
-      promptValue,
+      effectivePrompt,
       attachments.map((a) => a.name),
       attachments
     );
@@ -410,24 +421,36 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             <Mic className="w-[17px] h-[17px] stroke-[1.9]" aria-hidden="true" />
           </button>
 
-          <button
-            type="button"
-            disabled={effectiveDisabled}
-            onClick={triggerSubmit}
-            aria-label="Отправить сообщение"
-            title={
-              isQuotaBlocked
-                ? 'Отправка заблокирована: лимит запросов исчерпан'
-                : 'Отправить сообщение (Enter)'
-            }
-            className={`focus-ring w-[36px] h-[36px] rounded-[11px] flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-              hasText && !effectiveDisabled
-                ? 'bg-[#4F46E5] text-white hover:bg-[#4338CA] active:bg-[#3730A3] shadow-2xs cursor-pointer'
-                : 'bg-[#F1F5F9] dark:bg-slate-800 text-[#94A3B8] dark:text-slate-500 hover:bg-[#E2E8F0] dark:hover:bg-slate-700'
-            }`}
-          >
-            <Send className="w-4 h-4" aria-hidden="true" />
-          </button>
+          {isStreaming ? (
+            <button
+              type="button"
+              onClick={onAbortStream}
+              aria-label="Остановить генерацию ответа"
+              title="Остановить генерацию"
+              className="focus-ring w-[36px] h-[36px] rounded-[11px] flex items-center justify-center bg-slate-900 dark:bg-white text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-100 shadow-2xs cursor-pointer transition-colors"
+            >
+              <Square className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={effectiveDisabled}
+              onClick={triggerSubmit}
+              aria-label="Отправить сообщение"
+              title={
+                isQuotaBlocked
+                  ? 'Отправка заблокирована: лимит запросов исчерпан'
+                  : 'Отправить сообщение (Enter)'
+              }
+              className={`focus-ring w-[36px] h-[36px] rounded-[11px] flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                canSubmit
+                  ? 'bg-[#4F46E5] text-white hover:bg-[#4338CA] active:bg-[#3730A3] shadow-2xs cursor-pointer'
+                  : 'bg-[#F1F5F9] dark:bg-slate-800 text-[#94A3B8] dark:text-slate-500 hover:bg-[#E2E8F0] dark:hover:bg-slate-700'
+              }`}
+            >
+              <Send className="w-4 h-4" aria-hidden="true" />
+            </button>
+          )}
         </div>
       </div>
 
