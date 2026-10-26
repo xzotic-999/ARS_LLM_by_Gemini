@@ -70,7 +70,7 @@ export const QuickPrompts: React.FC<QuickPromptsProps> = ({
   return (
     <section
       aria-labelledby="quick-prompts-heading"
-      className="w-full max-w-[680px] mx-auto mt-7"
+      className="w-full max-w-[900px] mx-auto mt-7"
     >
       <h3
         id="quick-prompts-heading"
@@ -80,7 +80,7 @@ export const QuickPrompts: React.FC<QuickPromptsProps> = ({
       </h3>
 
       {/* Symmetric Equal-Column Grid (2x3 on mobile/tablet, 3x2 on desktop — Report 2) */}
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-[680px] mx-auto">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-[900px] mx-auto">
         {prompts.map((qp) => (
           <button
             key={qp.id}

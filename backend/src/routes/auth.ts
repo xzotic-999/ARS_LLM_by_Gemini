@@ -3,6 +3,7 @@ import { pool } from "../db/index.js";
 import { verifyPassword } from "../services/password.js";
 import { setSessionUser } from "../middleware/sessionUser.js";
 import { getUserQuotaStatus } from "../services/quota.js";
+import { validateProfileSelfUpdatePayload } from "../services/instruction.js";
 import type { UserPublic } from "../types.js";
 
 const router = Router();
@@ -118,7 +119,63 @@ router.get("/me", async (req, res) => {
   }
 });
 
-// GET /api/v1/auth/quotas — current user's daily and monthly quota status
+// PATCH /api/v1/auth/profile — update current user's display name (corporate email & role are read-only)
+router.patch("/profile", async (req, res, next) => {
+  try {
+    const sessionUser = (req.session as { user?: UserPublic } | undefined)?.user;
+    if (!sessionUser) {
+      res.status(401).json({
+        error: { message: "Not authenticated." },
+      });
+      return;
+    }
+
+    const validation = validateProfileSelfUpdatePayload(req.body, sessionUser);
+    if (!validation.ok) {
+      res.status(validation.status).json({
+        error: { message: validation.error },
+      });
+      return;
+    }
+
+    const updateRes = await pool.query(
+      `UPDATE users
+       SET name = $1, updated_at = NOW()
+       WHERE id = $2 AND is_active = TRUE
+       RETURNING id, name, email, role, is_active, email_verified, created_at`,
+      [validation.name, sessionUser.id]
+    );
+
+    if (updateRes.rows.length === 0) {
+      res.status(403).json({
+        error: { message: "Account is deactivated or not found." },
+      });
+      return;
+    }
+
+    const row = updateRes.rows[0];
+    const updatedUser: UserPublic = {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      role: row.role,
+      is_active: row.is_active,
+      email_verified: Boolean(row.email_verified),
+      created_at: row.created_at ? new Date(row.created_at) : new Date(),
+    };
+
+    setSessionUser(req, updatedUser);
+
+    res.status(200).json({
+      user: updatedUser,
+      personalInstructions: validation.personalInstructions,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/auth/quotas — current user's daily and monthly quota status (read-only)
 router.get("/quotas", async (req, res, next) => {
   const user = (req.session as { user?: UserPublic } | undefined)?.user;
   if (!user) {
@@ -133,6 +190,17 @@ router.get("/quotas", async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+});
+
+// Explicitly forbid any attempt by a user to mutate their own quotas via /api/v1/auth/quotas
+router.all("/quotas", (_req, res) => {
+  res.status(403).json({
+    error: {
+      code: "FORBIDDEN",
+      message:
+        "Сотрудник не может изменять свои квоты запросов. Обратитесь к администратору.",
+    },
+  });
 });
 
 export default router;

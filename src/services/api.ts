@@ -51,20 +51,46 @@ export interface AdminUsageResponse {
   }>;
 }
 
+export interface ApiErrorDetails {
+  code?: string;
+  reason?: 'daily_limit_exceeded' | 'monthly_limit_exceeded' | string;
+  period?: 'daily' | 'monthly';
+  contactAdmin?: boolean;
+  quotas?: QuotaLimits;
+}
+
 export class ApiError extends Error {
   status: number;
+  code?: string;
+  reason?: string;
+  period?: 'daily' | 'monthly';
+  contactAdmin?: boolean;
+  quotas?: QuotaLimits;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, details?: ApiErrorDetails) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.code = details?.code;
+    this.reason = details?.reason;
+    this.period = details?.period;
+    this.contactAdmin = details?.contactAdmin;
+    this.quotas = details?.quotas;
   }
 }
 
 export type ParsedSseEvent =
   | { type: 'delta'; content: string }
   | { type: 'done' }
-  | { type: 'error'; message: string };
+  | {
+      type: 'error';
+      message: string;
+      code?: string;
+      reason?: string;
+      period?: 'daily' | 'monthly';
+      contactAdmin?: boolean;
+      quotas?: QuotaLimits;
+    };
 
 /**
  * Validates corporate email addresses including .local intranet addresses (e.g. admin@ars_llm.local).
@@ -123,11 +149,33 @@ export function parseSseLines(rawBuffer: string): {
     try {
       const parsed = JSON.parse(payload);
       if (pendingErrorEvent || parsed?.error) {
+        const errObj = parsed?.error ?? {};
         const msg =
-          typeof parsed?.error?.message === 'string'
-            ? parsed.error.message
+          typeof errObj?.message === 'string'
+            ? errObj.message
             : 'Ошибка генерации ответа.';
-        events.push({ type: 'error', message: msg });
+        const extractedQuotas =
+          extractQuotaLimits(errObj?.quotas) ?? extractQuotaLimits(parsed?.quotas) ?? undefined;
+        const errEvent: ParsedSseEvent = {
+          type: 'error',
+          message: msg,
+        };
+        if (typeof errObj?.code === 'string') {
+          errEvent.code = errObj.code;
+        }
+        if (typeof errObj?.reason === 'string') {
+          errEvent.reason = errObj.reason;
+        }
+        if (errObj?.period === 'daily' || errObj?.period === 'monthly') {
+          errEvent.period = errObj.period;
+        }
+        if (typeof errObj?.contact_admin === 'boolean') {
+          errEvent.contactAdmin = errObj.contact_admin;
+        }
+        if (extractedQuotas) {
+          errEvent.quotas = extractedQuotas;
+        }
+        events.push(errEvent);
         pendingErrorEvent = false;
         continue;
       }
@@ -145,11 +193,39 @@ export function parseSseLines(rawBuffer: string): {
 }
 
 const API_BASE = '/api/v1';
+const SESSION_TOKEN_KEY = 'ars_llm_session_token_v1';
+
+function readStoredSessionToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.localStorage.getItem(SESSION_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSessionToken(token: string | null): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (token) {
+      window.localStorage.setItem(SESSION_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(SESSION_TOKEN_KEY);
+    }
+  } catch {
+    // Ignore storage errors in restricted environments
+  }
+}
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string>),
   };
+
+  const sessionToken = readStoredSessionToken();
+  if (sessionToken && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${sessionToken}`;
+  }
 
   if (options.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
@@ -169,22 +245,34 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (contentType.includes('text/html')) {
     throw new ApiError(
       503,
-      'Сервер ARS_LLM недоступен. Запустите локальный backend через Docker Compose или войдите в эталонный демо-режим.'
+      'Сервер ARS_LLM временно недоступен. Повторите попытку входа через несколько секунд.'
     );
   }
 
   const data = await res.json().catch(() => null);
 
   if (!res.ok) {
+    const errObj = data?.error ?? {};
     const message =
-      data?.error?.message ||
+      errObj?.message ||
       data?.message ||
       (res.status === 401
         ? 'Сессия истекла или требуется авторизация.'
         : res.status === 429
           ? 'Превышен лимит запросов. Обратитесь к администратору.'
           : `Ошибка запроса (HTTP ${res.status})`);
-    throw new ApiError(res.status, message);
+    const extractedQuotas =
+      extractQuotaLimits(errObj?.quotas) ?? extractQuotaLimits(data?.quotas) ?? undefined;
+    throw new ApiError(res.status, message, {
+      code: typeof errObj?.code === 'string' ? errObj.code : undefined,
+      reason: typeof errObj?.reason === 'string' ? errObj.reason : undefined,
+      period:
+        errObj?.period === 'daily' || errObj?.period === 'monthly'
+          ? errObj.period
+          : undefined,
+      contactAdmin: Boolean(errObj?.contact_admin || res.status === 429),
+      quotas: extractedQuotas,
+    });
   }
 
   return data as T;
@@ -221,10 +309,17 @@ export function extractQuotaLimits(payload: unknown): QuotaLimits | null {
 
 export const authApi = {
   login: async (email: string, password: string) => {
-    const raw = await request<{ user: UserProfile; quotas?: QuotaLimits }>('/auth/login', {
+    const raw = await request<{
+      user: UserProfile;
+      quotas?: QuotaLimits;
+      sessionToken?: string;
+    }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email: email.trim(), password }),
     });
+    if (typeof raw.sessionToken === 'string' && raw.sessionToken) {
+      writeStoredSessionToken(raw.sessionToken);
+    }
     const quotas = extractQuotaLimits(raw) ?? raw.user?.quotas ?? undefined;
     return {
       user: quotas ? { ...raw.user, quotas } : raw.user,
@@ -232,10 +327,15 @@ export const authApi = {
     };
   },
 
-  logout: () =>
-    request<{ ok: boolean }>('/auth/logout', {
-      method: 'POST',
-    }),
+  logout: async () => {
+    try {
+      return await request<{ ok: boolean }>('/auth/logout', {
+        method: 'POST',
+      });
+    } finally {
+      writeStoredSessionToken(null);
+    }
+  },
 
   me: async () => {
     const raw = await request<{ user: UserProfile; quotas?: QuotaLimits }>('/auth/me');
@@ -253,6 +353,16 @@ export const authApi = {
       throw new Error('Invalid quota response format');
     }
     return { quotas };
+  },
+
+  updateProfile: async (payload: {
+    name: string;
+    personalInstructions?: string;
+  }): Promise<{ user: UserProfile; personalInstructions?: string }> => {
+    return request<{ user: UserProfile; personalInstructions?: string }>('/auth/profile', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
   },
 };
 
@@ -327,10 +437,18 @@ export const chatApi = {
       try {
         // On second client attempt, allow non-streaming fallback if first stream attempt failed
         const useStream = attempt === 0;
+        const streamHeaders: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        const sessionToken = readStoredSessionToken();
+        if (sessionToken) {
+          streamHeaders['Authorization'] = `Bearer ${sessionToken}`;
+        }
+
         const res = await fetch(`${API_BASE}/chat/completions`, {
           method: 'POST',
           credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
+          headers: streamHeaders,
           body: JSON.stringify({ messages, stream: useStream }),
           signal,
         });
@@ -345,14 +463,26 @@ export const chatApi = {
 
         if (!res.ok) {
           const data = await res.json().catch(() => null);
+          const errObj = data?.error ?? {};
           const message =
-            data?.error?.message ||
+            errObj?.message ||
             (res.status === 429
               ? 'Превышен лимит запросов. Обратитесь к администратору.'
               : res.status === 401
                 ? 'Сессия истекла. Пожалуйста, войдите снова.'
                 : `Ошибка генерации ответа (HTTP ${res.status})`);
-          throw new ApiError(res.status, message);
+          const extractedQuotas =
+            extractQuotaLimits(errObj?.quotas) ?? extractQuotaLimits(data?.quotas) ?? undefined;
+          throw new ApiError(res.status, message, {
+            code: typeof errObj?.code === 'string' ? errObj.code : undefined,
+            reason: typeof errObj?.reason === 'string' ? errObj.reason : undefined,
+            period:
+              errObj?.period === 'daily' || errObj?.period === 'monthly'
+                ? errObj.period
+                : undefined,
+            contactAdmin: Boolean(errObj?.contact_admin || res.status === 429),
+            quotas: extractedQuotas,
+          });
         }
 
         if (contentType.includes('application/json')) {
@@ -375,7 +505,7 @@ export const chatApi = {
         const decoder = new TextDecoder();
         let buffer = '';
         let finished = false;
-        let streamErrorMsg: string | null = null;
+        let streamErrorObj: Error | null = null;
 
         while (!finished) {
           const { done, value } = await reader.read();
@@ -391,7 +521,16 @@ export const chatApi = {
               onToken(ev.content);
             } else if (ev.type === 'error') {
               finished = true;
-              streamErrorMsg = ev.message;
+              streamErrorObj =
+                ev.code === 'QUOTA_EXCEEDED'
+                  ? new ApiError(429, ev.message, {
+                      code: ev.code,
+                      reason: ev.reason,
+                      period: ev.period,
+                      contactAdmin: ev.contactAdmin ?? true,
+                      quotas: ev.quotas,
+                    })
+                  : new Error(ev.message);
               break;
             } else if (ev.type === 'done') {
               finished = true;
@@ -399,15 +538,16 @@ export const chatApi = {
                 onDone();
                 return;
               }
-              streamErrorMsg =
-                'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.';
+              streamErrorObj = new Error(
+                'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.'
+              );
               break;
             }
           }
         }
 
-        if (streamErrorMsg) {
-          throw new Error(streamErrorMsg);
+        if (streamErrorObj) {
+          throw streamErrorObj;
         }
 
         if (!receivedAnyToken && !signal?.aborted) {

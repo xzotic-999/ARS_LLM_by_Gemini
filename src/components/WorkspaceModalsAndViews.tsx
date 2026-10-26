@@ -11,6 +11,9 @@ import {
   Shield,
   Save,
   RefreshCw,
+  Lock,
+  User,
+  Check,
 } from 'lucide-react';
 import {
   ChatSession,
@@ -23,6 +26,7 @@ import {
   applyQuotaLimitChange,
   canConfigureQuotas,
   validateModelParameters,
+  validateProfileUpdate,
 } from '../utils/dashboardLogic';
 import {
   adminApi,
@@ -211,19 +215,25 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
       monthly: { used: 38, limit: 500 },
     };
     const dailyLimit =
-      effectiveQuotas.daily.limit && effectiveQuotas.daily.limit > 0
+      typeof effectiveQuotas.daily.limit === 'number' && effectiveQuotas.daily.limit >= 0
         ? effectiveQuotas.daily.limit
         : null;
     const monthlyLimit =
-      effectiveQuotas.monthly.limit && effectiveQuotas.monthly.limit > 0
+      typeof effectiveQuotas.monthly.limit === 'number' && effectiveQuotas.monthly.limit >= 0
         ? effectiveQuotas.monthly.limit
         : null;
-    const dailyPct = dailyLimit
-      ? Math.min(100, Math.round((effectiveQuotas.daily.used / dailyLimit) * 100))
-      : 0;
-    const monthlyPct = monthlyLimit
-      ? Math.min(100, Math.round((effectiveQuotas.monthly.used / monthlyLimit) * 100))
-      : 0;
+    const dailyPct =
+      dailyLimit !== null
+        ? dailyLimit === 0
+          ? 100
+          : Math.min(100, Math.round((effectiveQuotas.daily.used / dailyLimit) * 100))
+        : 0;
+    const monthlyPct =
+      monthlyLimit !== null
+        ? monthlyLimit === 0
+          ? 100
+          : Math.min(100, Math.round((effectiveQuotas.monthly.used / monthlyLimit) * 100))
+        : 0;
     const dailyRemaining =
       dailyLimit !== null ? Math.max(0, dailyLimit - effectiveQuotas.daily.used) : null;
     const monthlyRemaining =
@@ -743,6 +753,24 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   );
 };
 
+function useModalScrollAndEscape(open: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!open) {
+      document.body.style.overflow = 'unset';
+      return;
+    }
+    document.body.style.overflow = 'hidden';
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = 'unset';
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open, onClose]);
+}
+
 interface PromptLibraryModalProps {
   open: boolean;
   templates: PromptTemplate[];
@@ -756,14 +784,7 @@ export const PromptLibraryModal: React.FC<PromptLibraryModalProps> = ({
   onClose,
   onSelectTemplate,
 }) => {
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [open, onClose]);
+  useModalScrollAndEscape(open, onClose);
 
   if (!open) return null;
 
@@ -772,10 +793,13 @@ export const PromptLibraryModal: React.FC<PromptLibraryModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="prompt-library-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs overscroll-contain"
     >
-      <div className="w-full max-w-[560px] rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] p-6 shadow-xl">
-        <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-800">
+      <div className="w-full max-w-[560px] max-h-[85vh] flex flex-col rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] p-6 shadow-xl overflow-hidden">
+        <div className="flex items-center justify-between pb-4 border-b border-slate-200 dark:border-slate-800 shrink-0">
           <h2 id="prompt-library-modal-title" className="text-[17px] font-bold text-slate-900 dark:text-slate-100">
             Библиотека промптов
           </h2>
@@ -789,7 +813,7 @@ export const PromptLibraryModal: React.FC<PromptLibraryModalProps> = ({
           </button>
         </div>
 
-        <div className="my-4 space-y-3 max-h-[360px] overflow-y-auto pr-1">
+        <div className="mt-4 space-y-3 overflow-y-auto modal-scroll-thin pr-1">
           {templates.map((tpl) => (
             <div
               key={tpl.id}
@@ -840,6 +864,8 @@ export const ModelParamsModal: React.FC<ModelParamsModalProps> = ({
   const [draft, setDraft] = useState<ModelParameters>(params);
   const [error, setError] = useState<string | null>(null);
 
+  useModalScrollAndEscape(open, onClose);
+
   useEffect(() => {
     setDraft(params);
     setError(null);
@@ -863,11 +889,14 @@ export const ModelParamsModal: React.FC<ModelParamsModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-labelledby="model-params-modal-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs overscroll-contain"
     >
       <form
         onSubmit={handleSubmit}
-        className="w-full max-w-[480px] rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] p-6 shadow-xl space-y-4"
+        className="w-full max-w-[480px] max-h-[85vh] overflow-y-auto modal-scroll-thin rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] p-6 shadow-xl space-y-4"
       >
         <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
           <div className="flex items-center gap-2">
@@ -995,6 +1024,8 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({
   onSelectTemplate,
   onClose,
 }) => {
+  useModalScrollAndEscape(open, onClose);
+
   if (!open) return null;
 
   return (
@@ -1002,10 +1033,13 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({
       role="dialog"
       aria-modal="true"
       aria-label="Быстрый поиск (Ctrl + K)"
-      className="fixed inset-0 z-50 flex items-start justify-center pt-20 p-4 bg-slate-900/50 backdrop-blur-xs"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-start justify-center pt-20 p-4 bg-slate-900/50 backdrop-blur-xs overscroll-contain"
     >
-      <div className="w-full max-w-[540px] rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] p-4 shadow-xl">
-        <div className="relative flex items-center border-b border-slate-200 dark:border-slate-800 pb-3">
+      <div className="w-full max-w-[540px] max-h-[80vh] flex flex-col rounded-2xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] p-4 shadow-xl overflow-hidden">
+        <div className="relative flex items-center border-b border-slate-200 dark:border-slate-800 pb-3 shrink-0">
           <Search className="w-4 h-4 text-slate-400 mr-2.5" aria-hidden="true" />
           <input
             type="search"
@@ -1026,7 +1060,7 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({
           </button>
         </div>
 
-        <div className="mt-3 max-h-[300px] overflow-y-auto space-y-3">
+        <div className="mt-3 overflow-y-auto modal-scroll-thin space-y-3">
           <div>
             <div className="text-[11px] font-semibold uppercase text-slate-400 px-2 mb-1">
               Недавние чаты ({sessions.length})
@@ -1071,3 +1105,360 @@ export const CommandSearchModal: React.FC<CommandSearchModalProps> = ({
     </div>
   );
 };
+
+const AVATAR_COLOR_SWATCHES = [
+  { hex: '#4F46E5', label: 'Индиго (основной)' },
+  { hex: '#0F172A', label: 'Тёмный сланец' },
+  { hex: '#0284C7', label: 'Корпоративный синий' },
+  { hex: '#059669', label: 'Изумрудный' },
+  { hex: '#475569', label: 'Нейтральный графит' },
+];
+
+export function getInitialsFromName(name: string, fallbackEmail?: string): string {
+  const cleaned = name.trim();
+  if (cleaned) {
+    const parts = cleaned.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+    }
+    return cleaned.slice(0, 2).toUpperCase();
+  }
+  if (fallbackEmail && fallbackEmail.trim()) {
+    return fallbackEmail.trim().slice(0, 2).toUpperCase();
+  }
+  return 'СО';
+}
+
+interface ProfileModalProps {
+  open: boolean;
+  user: UserProfile | null;
+  quotas: QuotaLimits | null;
+  personalInstructions: string;
+  avatarColor: string;
+  onSaveProfile: (payload: {
+    name: string;
+    personalInstructions: string;
+    avatarColor: string;
+  }) => void;
+  onClose: () => void;
+}
+
+export const ProfileModal: React.FC<ProfileModalProps> = ({
+  open,
+  user,
+  quotas,
+  personalInstructions,
+  avatarColor,
+  onSaveProfile,
+  onClose,
+}) => {
+  const defaultName =
+    user?.name?.trim() || (user?.role === 'admin' ? 'Администратор ИТ' : 'Сотрудник');
+  const corporateEmail = user?.email || 'employee@company.kz';
+
+  const [draftName, setDraftName] = useState(defaultName);
+  const [draftInstructions, setDraftInstructions] = useState(personalInstructions);
+  const [draftAvatarColor, setDraftAvatarColor] = useState(avatarColor || '#4F46E5');
+  const [error, setError] = useState<string | null>(null);
+
+  useModalScrollAndEscape(open, onClose);
+
+  useEffect(() => {
+    if (open) {
+      setDraftName(
+        user?.name?.trim() || (user?.role === 'admin' ? 'Администратор ИТ' : 'Сотрудник')
+      );
+      setDraftInstructions(personalInstructions);
+      setDraftAvatarColor(avatarColor || '#4F46E5');
+      setError(null);
+    }
+  }, [open, user, personalInstructions, avatarColor]);
+
+  if (!open) return null;
+
+  const initials = getInitialsFromName(draftName, corporateEmail);
+  const dailyLimit =
+    quotas?.daily.limit && quotas.daily.limit > 0 ? quotas.daily.limit : null;
+  const monthlyLimit =
+    quotas?.monthly.limit && quotas.monthly.limit > 0 ? quotas.monthly.limit : null;
+  const dailyUsed = quotas?.daily.used ?? 0;
+  const monthlyUsed = quotas?.monthly.used ?? 0;
+
+  const dailyPct = dailyLimit
+    ? Math.min(100, Math.round((dailyUsed / dailyLimit) * 100))
+    : 8;
+  const monthlyPct = monthlyLimit
+    ? Math.min(100, Math.round((monthlyUsed / monthlyLimit) * 100))
+    : 8;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const check = validateProfileUpdate({
+      name: draftName,
+      currentEmail: corporateEmail,
+      personalInstructions: draftInstructions,
+      avatarColor: draftAvatarColor,
+    });
+    if (!check.valid) {
+      setError(check.error);
+      return;
+    }
+    onSaveProfile({
+      name: check.name,
+      personalInstructions: check.personalInstructions,
+      avatarColor: check.avatarColor,
+    });
+    onClose();
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="profile-modal-title"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs overscroll-contain"
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="animate-fade-up w-full max-w-[540px] max-h-[88vh] flex flex-col rounded-[20px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-[#0E1322] shadow-[0_18px_48px_rgba(15,23,42,0.16)] dark:shadow-[0_18px_48px_rgba(0,0,0,0.55)] overflow-hidden"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E6E8F0] dark:border-slate-800 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <User className="w-4 h-4 text-[#4F46E5] dark:text-indigo-400" aria-hidden="true" />
+            <h2
+              id="profile-modal-title"
+              className="text-[16.5px] font-bold tracking-tight text-[#0F172A] dark:text-white"
+            >
+              Профиль и персональные инструкции
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Закрыть окно профиля"
+            className="focus-ring p-1.5 rounded-lg text-[#64748B] hover:text-[#0F172A] hover:bg-[#F1F5F9] dark:hover:bg-slate-800 dark:hover:text-slate-200"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Single Thin-Scrollbar Body */}
+        <div className="p-6 overflow-y-auto modal-scroll-thin space-y-5">
+          {/* Avatar + Identity Row */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#E6E8F0] dark:border-slate-800/80">
+            <div className="flex items-center gap-3.5 min-w-0">
+              <div
+                className="w-12 h-12 rounded-full flex items-center justify-center text-white text-[15px] font-bold tracking-wide shrink-0 shadow-2xs"
+                style={{ backgroundColor: draftAvatarColor }}
+                aria-hidden="true"
+              >
+                {initials}
+              </div>
+              <div className="min-w-0">
+                <div className="text-[14px] font-bold text-[#0F172A] dark:text-white truncate">
+                  {draftName.trim() || defaultName}
+                </div>
+                <div className="text-[12px] text-[#64748B] dark:text-slate-400 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5">
+                  <span className="whitespace-nowrap">
+                    {user?.role === 'admin' ? 'Администратор ИТ' : 'Сотрудник организации'}
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-mono text-[11px] whitespace-nowrap">{corporateEmail}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5" role="radiogroup" aria-label="Цвет аватара профиля">
+              {AVATAR_COLOR_SWATCHES.map((swatch) => {
+                const selected = draftAvatarColor === swatch.hex;
+                return (
+                  <button
+                    key={swatch.hex}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    aria-label={swatch.label}
+                    title={swatch.label}
+                    onClick={() => setDraftAvatarColor(swatch.hex)}
+                    className={`focus-ring w-6 h-6 rounded-full flex items-center justify-center transition-transform ${
+                      selected ? 'ring-2 ring-offset-2 ring-[#4F46E5] dark:ring-offset-[#0E1322]' : 'opacity-80 hover:opacity-100'
+                    }`}
+                    style={{ backgroundColor: swatch.hex }}
+                  >
+                    {selected && <Check className="w-3 h-3 text-white stroke-[2.5]" aria-hidden="true" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Name & Read-Only Corporate Email Grid */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label
+                htmlFor="profile-name-input"
+                className="block text-[12.5px] font-semibold text-[#1E293B] dark:text-slate-200 mb-1.5"
+              >
+                Имя сотрудника
+              </label>
+              <input
+                id="profile-name-input"
+                type="text"
+                value={draftName}
+                onChange={(e) => {
+                  setDraftName(e.target.value);
+                  if (error) setError(null);
+                }}
+                placeholder="Имя и фамилия"
+                className="focus-ring w-full h-[40px] px-3.5 rounded-[11px] border border-[#E2E5EE] dark:border-slate-700 bg-[#F8FAFC] dark:bg-[#131829] focus:bg-white dark:focus:bg-[#151B2E] focus:border-[#4F46E5] text-[13.5px] text-[#0F172A] dark:text-slate-100"
+              />
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <label
+                  htmlFor="profile-email-readonly"
+                  className="block text-[12.5px] font-semibold text-[#1E293B] dark:text-slate-200"
+                >
+                  Корпоративная почта
+                </label>
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#64748B] dark:text-slate-400">
+                  <Lock className="w-3 h-3" aria-hidden="true" />
+                  <span>Read-only</span>
+                </span>
+              </div>
+              <input
+                id="profile-email-readonly"
+                type="email"
+                value={corporateEmail}
+                readOnly
+                aria-readonly="true"
+                className="w-full h-[40px] px-3.5 rounded-[11px] border border-[#E2E5EE] dark:border-slate-800 bg-[#F1F5F9] dark:bg-slate-800/60 text-[13.5px] text-[#64748B] dark:text-slate-400 font-mono cursor-not-allowed select-all focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Request Quotas Summary Block */}
+          <div className="rounded-[14px] border border-[#E2E5EE] dark:border-slate-800 bg-[#F8FAFC] dark:bg-[#131829] p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[12.5px] font-semibold text-[#0F172A] dark:text-slate-100">
+                Квоты запросов учётной записи
+              </span>
+              <span className="text-[11.5px] text-[#64748B] dark:text-slate-400">
+                {user?.role === 'admin' ? 'Тариф: Администратор' : 'Тариф: Стандартный корпоративный'}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="text-[#475569] dark:text-slate-300 font-medium">Дневной лимит</span>
+                  <span className="tabular-nums font-semibold text-[#0F172A] dark:text-slate-100">
+                    {dailyUsed} / {dailyLimit ?? '∞'}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Дневная квота в профиле"
+                  aria-valuenow={dailyUsed}
+                  aria-valuemin={0}
+                  aria-valuemax={dailyLimit ?? 100}
+                  className="h-1.5 w-full rounded-full bg-[#E2E8F0] dark:bg-slate-800 overflow-hidden"
+                >
+                  <div
+                    className="h-full rounded-full bg-[#4F46E5] dark:bg-indigo-400 transition-[width] duration-300"
+                    style={{ width: `${dailyPct}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[12px]">
+                  <span className="text-[#475569] dark:text-slate-300 font-medium">Месячный лимит</span>
+                  <span className="tabular-nums font-semibold text-[#0F172A] dark:text-slate-100">
+                    {monthlyUsed} / {monthlyLimit ?? '∞'}
+                  </span>
+                </div>
+                <div
+                  role="progressbar"
+                  aria-label="Месячная квота в профиле"
+                  aria-valuenow={monthlyUsed}
+                  aria-valuemin={0}
+                  aria-valuemax={monthlyLimit ?? 100}
+                  className="h-1.5 w-full rounded-full bg-[#E2E8F0] dark:bg-slate-800 overflow-hidden"
+                >
+                  <div
+                    className="h-full rounded-full bg-[#4F46E5] dark:bg-indigo-400 transition-[width] duration-300"
+                    style={{ width: `${monthlyPct}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Personal Instructions Field */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label
+                htmlFor="profile-personal-instructions"
+                className="block text-[12.5px] font-semibold text-[#1E293B] dark:text-slate-200"
+              >
+                Персональные инструкции для ARS LLM
+              </label>
+              <span className="text-[11.5px] text-[#64748B] dark:text-slate-400 tabular-nums">
+                {draftInstructions.length} / 1500
+              </span>
+            </div>
+            <textarea
+              id="profile-personal-instructions"
+              rows={4}
+              value={draftInstructions}
+              onChange={(e) => {
+                setDraftInstructions(e.target.value);
+                if (error) setError(null);
+              }}
+              placeholder="Укажите вашу роль, подразделение или желаемый стиль ответов (например: «Я ведущий аналитик данных. Отвечай структурированно, приводи SQL/TypeScript примеры и выделяй ключевые риски»)."
+              className="focus-ring w-full p-3.5 rounded-[12px] border border-[#E2E5EE] dark:border-slate-700 bg-[#F8FAFC] dark:bg-[#131829] focus:bg-white dark:focus:bg-[#151B2E] focus:border-[#4F46E5] text-[13px] leading-relaxed text-[#0F172A] dark:text-slate-100 placeholder:text-[#94A3B8] dark:placeholder:text-slate-500 resize-y"
+            />
+            <p className="mt-1.5 text-[11.5px] text-[#64748B] dark:text-slate-400 leading-relaxed">
+              Эти инструкции автоматически передаются в контекст новых диалогов и помогают адаптировать ответы под ваши рабочие задачи.
+            </p>
+          </div>
+
+          {error && (
+            <div
+              role="alert"
+              className="p-3 rounded-[11px] border border-[#FECACA] dark:border-red-900/60 bg-[#FEF2F2] dark:bg-red-950/40 text-[12.5px] text-[#B91C1C] dark:text-red-300"
+            >
+              {error}
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2.5 px-6 py-3.5 border-t border-[#E6E8F0] dark:border-slate-800 bg-[#F8FAFC] dark:bg-[#111627] shrink-0">
+          <button
+            type="button"
+            onClick={onClose}
+            className="focus-ring h-[38px] px-4 rounded-[11px] border border-[#E2E5EE] dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-[#F1F5F9] dark:hover:bg-slate-700 text-[13px] font-medium text-[#1E293B] dark:text-slate-200 transition-colors"
+          >
+            Отмена
+          </button>
+          <button
+            type="submit"
+            className="focus-ring h-[38px] px-4 rounded-[11px] bg-[#4F46E5] hover:bg-[#4338CA] active:bg-[#3730A3] text-white text-[13px] font-semibold flex items-center gap-1.5 shadow-2xs transition-colors"
+          >
+            <Save className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>Сохранить профиль</span>
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+

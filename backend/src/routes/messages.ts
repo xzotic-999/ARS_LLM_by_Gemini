@@ -2,10 +2,10 @@ import { Router } from "express";
 import { pool } from "../db/index.js";
 import { requireAuth } from "../middleware/auth.js";
 import {
-  reserveQuota,
-  checkQuota,
+  acquireQuotaReservation,
+  buildQuotaExceededError,
   recordUsage,
-  getUserQuotaLimits,
+  getUserQuotaStatus,
 } from "../services/quota.js";
 
 const router = Router();
@@ -101,35 +101,47 @@ router.post("/", async (req, res, next) => {
       return;
     }
 
-    // For user messages: check quota (if defer_quota_to_completion is true, completion route reserves it;
-    // otherwise reserve directly so standalone POST /api/v1/messages still enforces quota).
+    // For user messages: verify quota availability before persisting user turn.
+    // When defer_quota_to_completion is true (standard chat flow), /api/v1/chat/completions
+    // performs the atomic reservation before calling FreeLLMAPI so we never double-charge.
     if (role === "user" || !role) {
-      const limits = await getUserQuotaLimits(userId);
-
-      const dailyOk = defer_quota_to_completion
-        ? (await checkQuota(userId, "daily", limits.daily.limit, limits.monthly.limit)).allowed
-        : await reserveQuota(
-            userId,
-            "daily",
-            limits.daily.limit,
-            limits.monthly.limit
-          );
-      const monthlyOk = defer_quota_to_completion
-        ? (await checkQuota(userId, "monthly", limits.daily.limit, limits.monthly.limit)).allowed
-        : await reserveQuota(
-            userId,
-            "monthly",
-            limits.daily.limit,
-            limits.monthly.limit
-          );
-
-      if (!dailyOk || !monthlyOk) {
-        res.status(429).json({
-          error: {
-            message: "Превышен лимит запросов. Обратитесь к администратору.",
-          },
+      if (defer_quota_to_completion) {
+        const currentQuotas = await getUserQuotaStatus(userId);
+        if (
+          currentQuotas.daily.limit !== null &&
+          currentQuotas.daily.used >= currentQuotas.daily.limit
+        ) {
+          const errPayload = buildQuotaExceededError("daily", currentQuotas);
+          res.status(429).json({
+            error: errPayload,
+            quotas: currentQuotas,
+          });
+          return;
+        }
+        if (
+          currentQuotas.monthly.limit !== null &&
+          currentQuotas.monthly.used >= currentQuotas.monthly.limit
+        ) {
+          const errPayload = buildQuotaExceededError("monthly", currentQuotas);
+          res.status(429).json({
+            error: errPayload,
+            quotas: currentQuotas,
+          });
+          return;
+        }
+      } else {
+        const reservation = await acquireQuotaReservation(userId);
+        if (!reservation.allowed) {
+          res.status(429).json({
+            error: reservation.error,
+            quotas: reservation.quotas,
+          });
+          return;
+        }
+        await reservation.commit({
+          mode: "standalone_message",
+          conversation_id,
         });
-        return;
       }
     }
 

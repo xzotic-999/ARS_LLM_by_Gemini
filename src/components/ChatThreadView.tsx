@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import {
   ChatSession,
+  QuotaBlockStatus,
   detectSpeechLanguage,
   stripMarkdownForSpeech,
   selectBestVoiceForLanguage,
@@ -38,6 +39,8 @@ interface ChatThreadViewProps {
   onAbortStream?: () => void;
   streamError?: string | null;
   onRetryLastPrompt?: () => void;
+  quotaBlockStatus?: QuotaBlockStatus | null;
+  onOpenQuotasView?: () => void;
 }
 
 export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
@@ -53,6 +56,8 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
   onAbortStream,
   streamError = null,
   onRetryLastPrompt,
+  quotaBlockStatus = null,
+  onOpenQuotasView,
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
@@ -150,7 +155,7 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
   return (
     <div className="flex-1 min-h-0 flex flex-col h-full w-full overflow-hidden pt-3 pb-3">
       {/* Compact Single-Line Context Bar (no duplicate title; title is in TopBar) */}
-      <div className="shrink-0 max-w-[820px] mx-auto w-full px-4 md:px-6">
+      <div className="shrink-0 max-w-[960px] mx-auto w-full px-4 md:px-6">
         <div className="flex items-center justify-between gap-3 pb-2.5 mb-3 border-b border-[#E6E8F0] dark:border-slate-800">
           <div className="flex items-center gap-3 min-w-0">
             <button
@@ -207,7 +212,7 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
         aria-live="polite"
         className="flex-1 min-h-0 w-full overflow-y-auto pb-3"
       >
-        <div className="max-w-[820px] mx-auto w-full px-4 md:px-6 space-y-3.5">
+        <div className="max-w-[960px] mx-auto w-full px-4 md:px-6 space-y-3.5">
         {session.messages.length === 0 ? (
           <div className="p-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] text-center text-[13.5px] text-slate-500 dark:text-slate-400">
             В этом диалоге пока нет сообщений. Отправьте вопрос ниже, чтобы начать.
@@ -366,15 +371,27 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
               <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
               <span>{streamError}</span>
             </div>
-            {onRetryLastPrompt && (
-              <button
-                type="button"
-                onClick={onRetryLastPrompt}
-                className="focus-ring px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-[12.5px] font-semibold flex items-center gap-1.5 shrink-0"
-              >
-                <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>Повторить запрос</span>
-              </button>
+            {quotaBlockStatus?.isBlocked ? (
+              onOpenQuotasView && (
+                <button
+                  type="button"
+                  onClick={onOpenQuotasView}
+                  className="focus-ring px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-[12.5px] font-semibold flex items-center gap-1.5 shrink-0"
+                >
+                  <span>Проверить квоты</span>
+                </button>
+              )
+            ) : (
+              onRetryLastPrompt && (
+                <button
+                  type="button"
+                  onClick={onRetryLastPrompt}
+                  className="focus-ring px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-[12.5px] font-semibold flex items-center gap-1.5 shrink-0"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Повторить запрос</span>
+                </button>
+              )
             )}
           </div>
         )}
@@ -382,13 +399,15 @@ export const ChatThreadView: React.FC<ChatThreadViewProps> = ({
       </div>
 
       {/* Pinned Follow-up Composer at Bottom of Viewport */}
-      <div className="pt-2 shrink-0 max-w-[820px] mx-auto w-full px-4 md:px-6">
+      <div className="pt-2 shrink-0 max-w-[960px] mx-auto w-full px-4 md:px-6">
         <ChatComposer
           promptValue={promptValue}
           onPromptChange={onPromptChange}
           onSubmitPrompt={onSubmitPrompt}
           onOpenPromptLibrary={onOpenPromptLibrary}
           onOpenModelParams={onOpenModelParams}
+          quotaBlockStatus={quotaBlockStatus}
+          onOpenQuotasView={onOpenQuotasView}
           compact
         />
       </div>

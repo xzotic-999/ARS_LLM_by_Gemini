@@ -848,6 +848,9 @@ export interface PersistedWorkspaceState {
   chatLists: ChatListCategory[];
   adminUsers: QuotaUpdateTargetUser[];
   modelParams: ModelParameters;
+  personalInstructions?: string;
+  profileDisplayName?: string;
+  profileAvatarColor?: string;
 }
 
 export const WORKSPACE_STORAGE_KEY = 'ars_llm_workspace_state_v2';
@@ -972,6 +975,12 @@ export function deserializeWorkspaceState(
       chatLists,
       adminUsers,
       modelParams,
+      personalInstructions:
+        typeof parsed.personalInstructions === 'string' ? parsed.personalInstructions : '',
+      profileDisplayName:
+        typeof parsed.profileDisplayName === 'string' ? parsed.profileDisplayName : undefined,
+      profileAvatarColor:
+        typeof parsed.profileAvatarColor === 'string' ? parsed.profileAvatarColor : '#4F46E5',
     };
   } catch {
     return null;
@@ -1029,3 +1038,194 @@ export function applyThemeWithSmoothTransition(
   applyDomTheme();
 }
 
+export interface ProfileUpdateInput {
+  name: string;
+  email?: string;
+  currentEmail: string;
+  personalInstructions: string;
+  avatarColor: string;
+}
+
+export type ProfileUpdateValidationResult =
+  | {
+      valid: true;
+      name: string;
+      personalInstructions: string;
+      avatarColor: string;
+    }
+  | {
+      valid: false;
+      error: string;
+    };
+
+const RESTRICTED_PERSONAL_INSTRUCTION_PATTERNS: RegExp[] = [
+  /(?:игнорируй|забудь|отмени|пренебреги)[\s\S]{0,40}(?:предыдущ[а-я]+|системн[а-я]+|все)\s+(?:инструкци[а-я]+|правил[а-я]+|указани[а-я]+)/i,
+  /\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|system)\s+(?:instructions|prompts|rules)\b/i,
+  /\b(?:prompt\s*injection|jailbreak|джейлбрейк)\b/i,
+  /(?:покажи|выведи|раскрой|напиши|повтори|цитируй)[\s\S]{0,40}(?:системн[а-я]+\s+промпт|системн[а-я]+\s+инструкци|instruction\.md)/i,
+];
+
+/**
+ * Validates profile modal edits:
+ * - Enforces read-only corporate email (`email` cannot differ from `currentEmail`).
+ * - Validates display name (`1..120` chars after trim).
+ * - Validates personal instructions (`0..1500` chars + blocks prompt injection / system override strings).
+ * - Validates hex avatar color (`^#[0-9A-Fa-f]{6}$`).
+ */
+export function validateProfileUpdate(
+  input: ProfileUpdateInput
+): ProfileUpdateValidationResult {
+  if (
+    input.email !== undefined &&
+    input.email.trim().toLowerCase() !== input.currentEmail.trim().toLowerCase()
+  ) {
+    return {
+      valid: false,
+      error: 'Корпоративная почта доступна только для чтения и не может быть изменена.',
+    };
+  }
+
+  const trimmedName = (input.name ?? '').trim();
+  if (!trimmedName) {
+    return {
+      valid: false,
+      error: 'Укажите имя сотрудника',
+    };
+  }
+
+  if (trimmedName.length > 120) {
+    return {
+      valid: false,
+      error: 'Имя сотрудника не должно превышать 120 символов',
+    };
+  }
+
+  const rawInstructions = input.personalInstructions ?? '';
+  if (rawInstructions.length > 1500) {
+    return {
+      valid: false,
+      error: 'Персональные инструкции не должны превышать 1500 символов',
+    };
+  }
+
+  const trimmedInstructions = rawInstructions.trim();
+  if (
+    trimmedInstructions &&
+    RESTRICTED_PERSONAL_INSTRUCTION_PATTERNS.some((re) => re.test(trimmedInstructions))
+  ) {
+    return {
+      valid: false,
+      error: 'Персональные инструкции содержат недопустимые директивы безопасности.',
+    };
+  }
+
+  const avatarColor = /^#[0-9A-Fa-f]{6}$/.test(input.avatarColor ?? '')
+    ? input.avatarColor
+    : '#4F46E5';
+
+  return {
+    valid: true,
+    name: trimmedName,
+    personalInstructions: trimmedInstructions,
+    avatarColor,
+  };
+}
+
+/**
+ * Prepends the user's saved personal instructions into the first user message context
+ * when sending conversation history to the model completion gateway.
+ */
+export function prependPersonalInstructionsToHistory(
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>,
+  personalInstructions?: string
+): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const cleaned = (personalInstructions ?? '').trim();
+  if (!cleaned || messages.length === 0) {
+    return messages;
+  }
+
+  const lastIdx = messages.length - 1;
+  return messages.map((msg, idx) => {
+    if (idx === lastIdx && msg.role === 'user') {
+      return {
+        role: 'user',
+        content: `[Персональные рабочие предпочтения сотрудника: ${cleaned}]\n\n${msg.content}`,
+      };
+    }
+    return msg;
+  });
+}
+
+export interface QuotaBlockStatus {
+  isBlocked: boolean;
+  period: 'daily' | 'monthly' | null;
+  reason: 'daily_limit_exceeded' | 'monthly_limit_exceeded' | null;
+  title: string | null;
+  message: string | null;
+  contactAdminHint: string | null;
+}
+
+/**
+ * Evaluates whether the user's daily or monthly quota is exhausted (`used >= limit`, including `limit === 0`).
+ * Used to disable prompt submission in the UI and display a clear message to contact the administrator.
+ */
+export function evaluateQuotaBlockStatus(
+  quotas:
+    | {
+        daily: { used: number; limit: number | null };
+        monthly: { used: number; limit: number | null };
+      }
+    | null
+    | undefined
+): QuotaBlockStatus {
+  if (!quotas) {
+    return {
+      isBlocked: false,
+      period: null,
+      reason: null,
+      title: null,
+      message: null,
+      contactAdminHint: null,
+    };
+  }
+
+  const dailyLimit =
+    typeof quotas.daily?.limit === 'number' && quotas.daily.limit >= 0
+      ? quotas.daily.limit
+      : null;
+  const monthlyLimit =
+    typeof quotas.monthly?.limit === 'number' && quotas.monthly.limit >= 0
+      ? quotas.monthly.limit
+      : null;
+
+  if (dailyLimit !== null && quotas.daily.used >= dailyLimit) {
+    return {
+      isBlocked: true,
+      period: 'daily',
+      reason: 'daily_limit_exceeded',
+      title: 'Дневной лимит запросов исчерпан',
+      message: `Исчерпан дневной лимит запросов (${quotas.daily.used} из ${dailyLimit}). Обратитесь к администратору для увеличения квоты.`,
+      contactAdminHint: 'Обратитесь к ИТ-администратору для увеличения лимита.',
+    };
+  }
+
+  if (monthlyLimit !== null && quotas.monthly.used >= monthlyLimit) {
+    return {
+      isBlocked: true,
+      period: 'monthly',
+      reason: 'monthly_limit_exceeded',
+      title: 'Месячный лимит запросов исчерпан',
+      message: `Исчерпан месячный лимит запросов (${quotas.monthly.used} из ${monthlyLimit}). Обратитесь к администратору для увеличения квоты.`,
+      contactAdminHint: 'Обратитесь к ИТ-администратору для увеличения лимита.',
+    };
+  }
+
+  return {
+    isBlocked: false,
+    period: null,
+    reason: null,
+    title: null,
+    message: null,
+    contactAdminHint: null,
+  };
+}

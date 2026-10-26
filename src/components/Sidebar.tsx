@@ -40,6 +40,8 @@ interface SidebarProps {
   onDeleteSession?: (sessionId: string) => Promise<void> | void;
   user?: UserProfile | null;
   quotas?: QuotaLimits | null;
+  avatarColor?: string;
+  onOpenProfile?: () => void;
   onLogout?: () => Promise<void> | void;
   isDemoMode?: boolean;
   onSwitchDemoRole?: (role: 'admin' | 'user') => void;
@@ -77,6 +79,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onDeleteSession,
   user = null,
   quotas = null,
+  avatarColor = '#4F46E5',
+  onOpenProfile,
   onLogout,
   isDemoMode = false,
   onSwitchDemoRole,
@@ -491,26 +495,48 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="mt-auto shrink-0 pt-2 bg-[#FAFAFC] dark:bg-[#111524]">
         {/* Quota Usage Card with Linear Progress Bars (Report 4) */}
         {!collapsed && quotas && (() => {
-          const dailyLimit = quotas.daily.limit && quotas.daily.limit > 0 ? quotas.daily.limit : null;
-          const monthlyLimit = quotas.monthly.limit && quotas.monthly.limit > 0 ? quotas.monthly.limit : null;
+          const dailyLimit =
+            typeof quotas.daily.limit === 'number' && quotas.daily.limit >= 0
+              ? quotas.daily.limit
+              : null;
+          const monthlyLimit =
+            typeof quotas.monthly.limit === 'number' && quotas.monthly.limit >= 0
+              ? quotas.monthly.limit
+              : null;
 
-          const dailyPct = dailyLimit
-            ? Math.min(100, Math.round((quotas.daily.used / dailyLimit) * 100))
-            : 0;
-          const monthlyPct = monthlyLimit
-            ? Math.min(100, Math.round((quotas.monthly.used / monthlyLimit) * 100))
-            : 0;
+          const dailyPct =
+            dailyLimit !== null
+              ? dailyLimit === 0
+                ? 100
+                : Math.min(100, Math.round((quotas.daily.used / dailyLimit) * 100))
+              : 0;
+          const monthlyPct =
+            monthlyLimit !== null
+              ? monthlyLimit === 0
+                ? 100
+                : Math.min(100, Math.round((quotas.monthly.used / monthlyLimit) * 100))
+              : 0;
 
-          const getBarColor = (pct: number) => {
-            if (pct >= 90) return 'bg-red-500 dark:bg-red-400';
+          const isExhausted =
+            (dailyLimit !== null && quotas.daily.used >= dailyLimit) ||
+            (monthlyLimit !== null && quotas.monthly.used >= monthlyLimit);
+
+          const getBarColor = (pct: number, exhausted: boolean) => {
+            if (exhausted || pct >= 90) return 'bg-red-500 dark:bg-red-400';
             if (pct >= 75) return 'bg-amber-500 dark:bg-amber-400';
             return 'bg-[#4F46E5] dark:bg-indigo-400';
           };
 
           return (
-            <div className="mx-3 mb-2 p-2.5 rounded-xl border border-[#E6E8F0] dark:border-slate-800 bg-white dark:bg-[#151A2D] space-y-2">
+            <div
+              className={`mx-3 mb-2 p-2.5 rounded-xl border ${
+                isExhausted
+                  ? 'border-red-200 dark:border-red-900/60 bg-red-50/40 dark:bg-red-950/20'
+                  : 'border-[#E6E8F0] dark:border-slate-800 bg-white dark:bg-[#151A2D]'
+              } space-y-2`}
+            >
               <div className="flex items-center justify-between text-[11px] font-semibold text-[#6B7280] dark:text-slate-400">
-                <span>Квоты запросов</span>
+                <span>{isExhausted ? 'Квота исчерпана' : 'Квоты запросов'}</span>
                 {isAdmin ? (
                   <button
                     type="button"
@@ -555,8 +581,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className="h-1.5 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
                 >
                   <div
-                    className={`h-full rounded-full transition-[width] duration-300 ${getBarColor(dailyPct)}`}
-                    style={{ width: `${dailyLimit ? dailyPct : 10}%` }}
+                    className={`h-full rounded-full transition-[width] duration-300 ${getBarColor(
+                      dailyPct,
+                      dailyLimit !== null && quotas.daily.used >= dailyLimit
+                    )}`}
+                    style={{ width: `${dailyLimit !== null ? dailyPct : 10}%` }}
                   />
                 </div>
               </div>
@@ -577,8 +606,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className="h-1.5 w-full rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden"
                 >
                   <div
-                    className={`h-full rounded-full transition-[width] duration-300 ${getBarColor(monthlyPct)}`}
-                    style={{ width: `${monthlyLimit ? monthlyPct : 10}%` }}
+                    className={`h-full rounded-full transition-[width] duration-300 ${getBarColor(
+                      monthlyPct,
+                      monthlyLimit !== null && quotas.monthly.used >= monthlyLimit
+                    )}`}
+                    style={{ width: `${monthlyLimit !== null ? monthlyPct : 10}%` }}
                   />
                 </div>
               </div>
@@ -587,33 +619,53 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })()}
 
         {/* User Profile Footer */}
-        <div className="relative pt-2.5 pb-3.5 px-4 border-t border-[#E6E8F0] dark:border-slate-800/90">
-          <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-between'} gap-2.5`}>
-            <div className="flex items-center gap-3 min-w-0">
+        <div className="relative pt-2.5 pb-3.5 px-3 border-t border-[#E6E8F0] dark:border-slate-800/90">
+          <div className={`flex items-center ${collapsed ? 'justify-center' : 'justify-between'} gap-1.5`}>
+            <button
+              type="button"
+              onClick={() => {
+                if (onOpenProfile) {
+                  onOpenProfile();
+                  setProfileMenuOpen(false);
+                } else {
+                  setProfileMenuOpen((prev) => !prev);
+                }
+              }}
+              aria-label={`Открыть профиль: ${displayUserName}`}
+              title="Открыть профиль и персональные инструкции"
+              className="focus-ring flex items-center gap-2.5 min-w-0 flex-1 p-1.5 rounded-xl hover:bg-slate-200/60 dark:hover:bg-slate-800/70 text-left transition-colors"
+            >
               <div
-                className="w-9 h-9 rounded-full bg-[#E8EBFF] dark:bg-indigo-500/20 flex items-center justify-center text-[#4F46E5] dark:text-indigo-400 shrink-0"
+                className="w-8 h-8 rounded-full flex items-center justify-center text-white text-[12px] font-bold tracking-wide shrink-0"
+                style={{ backgroundColor: avatarColor || '#4F46E5' }}
                 aria-hidden="true"
               >
-                <User className="w-4 h-4 stroke-[1.8]" />
+                {(() => {
+                  const parts = displayUserName.trim().split(/\s+/).filter(Boolean);
+                  if (parts.length >= 2) {
+                    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
+                  }
+                  return displayUserName.trim().slice(0, 2).toUpperCase() || 'СО';
+                })()}
               </div>
               {!collapsed && (
-                <div className="min-w-0">
-                  <div className="text-[13px] font-semibold text-[#111827] dark:text-slate-100 truncate">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13px] font-semibold text-[#0F172A] dark:text-slate-100 truncate">
                     {displayUserName}
                   </div>
-                  <div className="text-[11.5px] text-[#6B7280] dark:text-slate-400 truncate">
+                  <div className="text-[11.5px] text-[#64748B] dark:text-slate-400 truncate font-mono">
                     {displayUserEmail}
                   </div>
                 </div>
               )}
-            </div>
+            </button>
             {!collapsed && (
               <button
                 type="button"
                 onClick={() => setProfileMenuOpen((prev) => !prev)}
                 aria-label="Меню профиля сотрудника"
                 aria-expanded={profileMenuOpen}
-                className="focus-ring p-1.5 rounded-lg text-[#6B7280] dark:text-slate-400 hover:text-[#111827] dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 shrink-0"
+                className="focus-ring p-1.5 rounded-lg text-[#64748B] dark:text-slate-400 hover:text-[#0F172A] dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-800 shrink-0"
               >
                 <MoreVertical className="w-4 h-4" aria-hidden="true" />
               </button>
@@ -624,13 +676,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div
               role="menu"
               aria-label="Действия профиля"
-              className="absolute bottom-14 left-4 right-4 p-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg z-30 text-[12.5px] space-y-1"
+              className="animate-fade-up absolute bottom-15 left-3 right-3 p-1.5 rounded-[14px] border border-[#E2E5EE] dark:border-slate-700 bg-white dark:bg-[#151B2E] shadow-lg z-30 text-[12.5px] space-y-0.5"
             >
-              <div className="px-2.5 py-1.5 text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-700/70">
-                {isDemoMode
-                  ? `Роль: ${isAdmin ? 'Администратор' : 'Сотрудник'} · Демо`
-                  : `Роль: ${isAdmin ? 'Администратор' : 'Сотрудник'}`}
+              <div className="px-2.5 py-1.5 text-[11.5px] font-medium text-[#64748B] dark:text-slate-400 border-b border-[#E6E8F0] dark:border-slate-700/70">
+                Роль: {isAdmin ? 'Администратор' : 'Сотрудник'}
               </div>
+              {onOpenProfile && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setProfileMenuOpen(false);
+                    onOpenProfile();
+                  }}
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-[#0F172A] dark:text-slate-100 hover:bg-[#F8FAFC] dark:hover:bg-slate-800 font-medium flex items-center gap-2"
+                >
+                  <User className="w-3.5 h-3.5 text-[#4F46E5] dark:text-indigo-400" aria-hidden="true" />
+                  <span>Профиль и инструкции</span>
+                </button>
+              )}
               {isAdmin ? (
                 <button
                   type="button"
@@ -639,9 +703,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     onSelectNav('admin');
                     setProfileMenuOpen(false);
                   }}
-                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-[#F8FAFC] dark:hover:bg-slate-800 flex items-center gap-2"
                 >
-                  <Shield className="w-3.5 h-3.5 text-indigo-500" aria-hidden="true" />
+                  <Shield className="w-3.5 h-3.5 text-[#4F46E5] dark:text-indigo-400" aria-hidden="true" />
                   <span>Управление квотами (Админ)</span>
                 </button>
               ) : (
@@ -652,7 +716,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     onSelectNav('quotas');
                     setProfileMenuOpen(false);
                   }}
-                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60 flex items-center gap-2"
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-[#F8FAFC] dark:hover:bg-slate-800 flex items-center gap-2"
                 >
                   <Shield className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
                   <span>Мои квоты (только просмотр)</span>
@@ -666,13 +730,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
                     onSwitchDemoRole(isAdmin ? 'user' : 'admin');
                     setProfileMenuOpen(false);
                   }}
-                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 font-medium flex items-center gap-2"
+                  className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-[#4F46E5] dark:text-indigo-400 hover:bg-indigo-50/70 dark:hover:bg-indigo-950/40 font-medium flex items-center gap-2"
                 >
                   <User className="w-3.5 h-3.5" aria-hidden="true" />
                   <span>
                     {isAdmin
-                      ? 'Переключить на: Сотрудник'
-                      : 'Переключить на: Администратор'}
+                      ? 'Роль: Сотрудник'
+                      : 'Роль: Администратор'}
                   </span>
                 </button>
               )}
@@ -683,7 +747,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   onSelectNav('history');
                   setProfileMenuOpen(false);
                 }}
-                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60"
+                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-[#F8FAFC] dark:hover:bg-slate-800"
               >
                 История активности
               </button>
@@ -698,17 +762,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                   className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 flex items-center gap-2"
                 >
                   <LogOut className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>{isDemoMode ? 'К экрану входа' : 'Выйти из аккаунта'}</span>
+                  <span>Выйти из аккаунта</span>
                 </button>
               )}
-              <button
-                type="button"
-                role="menuitem"
-                onClick={() => setProfileMenuOpen(false)}
-                className="focus-ring w-full text-left px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60"
-              >
-                Закрыть меню
-              </button>
             </div>
           )}
         </div>

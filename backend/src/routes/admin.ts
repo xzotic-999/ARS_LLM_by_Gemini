@@ -215,7 +215,7 @@ router.get("/users/:id/quotas", async (req, res, next) => {
   }
 });
 
-// PUT /api/v1/admin/users/:id/quotas — set quota limits
+// PUT /api/v1/admin/users/:id/quotas — set quota limits (admin only)
 router.put("/users/:id/quotas", async (req, res, next) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -225,32 +225,28 @@ router.put("/users/:id/quotas", async (req, res, next) => {
       return;
     }
 
-    const { daily_limit, monthly_limit } = req.body;
+    const { daily_limit, monthly_limit } = req.body ?? {};
+    const { setUserQuotaLimitsForActor } = await import("../services/quota.js");
 
-    if (
-      daily_limit !== null &&
-      (typeof daily_limit !== "number" || daily_limit < 0 || !Number.isInteger(daily_limit))
-    ) {
-      res.status(400).json({
-        error: { message: "daily_limit must be a non-negative integer or null." },
+    const updateResult = await setUserQuotaLimitsForActor(
+      req.user,
+      id,
+      daily_limit ?? null,
+      monthly_limit ?? null
+    );
+
+    if (!updateResult.ok) {
+      res.status(updateResult.status).json({
+        error: updateResult.error,
       });
       return;
     }
 
-    if (
-      monthly_limit !== null &&
-      (typeof monthly_limit !== "number" || monthly_limit < 0 || !Number.isInteger(monthly_limit))
-    ) {
-      res.status(400).json({
-        error: { message: "monthly_limit must be a non-negative integer or null." },
-      });
-      return;
-    }
-
-    await setUserQuotaLimits(id, daily_limit, monthly_limit);
-    const quotas = await getUserQuotaStatus(id);
-
-    res.json({ user_id: id, quotas, message: "Quota limits updated." });
+    res.json({
+      user_id: id,
+      quotas: updateResult.quotas,
+      message: "Quota limits updated.",
+    });
   } catch (err) {
     next(err);
   }

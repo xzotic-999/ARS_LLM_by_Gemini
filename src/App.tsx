@@ -15,6 +15,7 @@ import {
   PromptLibraryModal,
   ModelParamsModal,
   CommandSearchModal,
+  ProfileModal,
 } from './components/WorkspaceModalsAndViews';
 import {
   ChatListCategory,
@@ -39,9 +40,11 @@ import {
   canConfigureQuotas,
   createCustomChatList,
   deserializeWorkspaceState,
+  evaluateQuotaBlockStatus,
   filterWorkspaceContent,
   formatTimestampShort,
   mapBackendConversationToSession,
+  prependPersonalInstructionsToHistory,
   serializeWorkspaceState,
 } from './utils/dashboardLogic';
 import {
@@ -151,7 +154,10 @@ export default function App() {
 
   const [user, setUser] = useState<UserProfile | null>(() => {
     if (!initialDemoActive) return null;
-    return initialDemoRole === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER;
+    const baseUser = initialDemoRole === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER;
+    return initialPersisted?.profileDisplayName
+      ? { ...baseUser, name: initialPersisted.profileDisplayName }
+      : baseUser;
   });
 
   const [backendQuotas, setBackendQuotas] = useState<QuotaLimits | null>(null);
@@ -187,6 +193,18 @@ export default function App() {
   const [promptLibraryOpen, setPromptLibraryOpen] = useState(false);
   const [modelParamsOpen, setModelParamsOpen] = useState(false);
   const [commandSearchOpen, setCommandSearchOpen] = useState(false);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+
+  const [personalInstructions, setPersonalInstructions] = useState<string>(
+    () => initialPersisted?.personalInstructions ?? ''
+  );
+  const [profileDisplayName, setProfileDisplayName] = useState<string | undefined>(
+    () => initialPersisted?.profileDisplayName
+  );
+  const [profileAvatarColor, setProfileAvatarColor] = useState<string>(
+    () => initialPersisted?.profileAvatarColor ?? '#4F46E5'
+  );
+
   const [modelParams, setModelParams] = useState<ModelParameters>(
     () => initialPersisted?.modelParams ?? DEFAULT_MODEL_PARAMETERS
   );
@@ -218,7 +236,7 @@ export default function App() {
     [theme]
   );
 
-  // Persist workspace state (chats, active session, quotas, role, theme) so refresh never loses data
+  // Persist workspace state (chats, active session, quotas, role, theme, personal instructions) so refresh never loses data
   useEffect(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -233,6 +251,9 @@ export default function App() {
         chatLists,
         adminUsers,
         modelParams,
+        personalInstructions,
+        profileDisplayName,
+        profileAvatarColor,
       });
       window.localStorage.setItem(WORKSPACE_STORAGE_KEY, payload);
     } catch {
@@ -249,6 +270,9 @@ export default function App() {
     chatLists,
     adminUsers,
     modelParams,
+    personalInstructions,
+    profileDisplayName,
+    profileAvatarColor,
   ]);
 
   // Global Ctrl+K / Cmd+K shortcut for search
@@ -270,6 +294,17 @@ export default function App() {
     return backendQuotas;
   }, [isDemoMode, demoRole, adminUsers, backendQuotas]);
 
+  const quotaBlockStatus = useMemo(
+    () => evaluateQuotaBlockStatus(quotas),
+    [quotas]
+  );
+
+  const handleOpenQuotasView = useCallback(() => {
+    setActiveSessionId(null);
+    setActiveCategoryId(null);
+    setActiveNav(canConfigureQuotas(user) ? 'admin' : 'quotas');
+  }, [user]);
+
   const refreshQuotas = useCallback(async () => {
     if (isDemoMode) return;
     try {
@@ -285,8 +320,11 @@ export default function App() {
     try {
       const list = await conversationsApi.list();
       setSessions((prev) => {
+        if (list.length === 0) {
+          return prev;
+        }
         const prevById = new Map(prev.map((s) => [s.id, s]));
-        return list.map((conv) => {
+        const mappedFromBackend = list.map((conv) => {
           const existing = prevById.get(`conv-${conv.id}`);
           return mapBackendConversationToSession(
             conv,
@@ -294,6 +332,9 @@ export default function App() {
             existing
           );
         });
+        const backendIds = new Set(mappedFromBackend.map((s) => s.id));
+        const localOnly = prev.filter((s) => !backendIds.has(s.id));
+        return [...mappedFromBackend, ...localOnly];
       });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -349,18 +390,12 @@ export default function App() {
     await Promise.all([loadConversations(), refreshQuotas()]);
   };
 
-  const handleEnterDemoMode = (role: 'user' | 'admin' = 'user') => {
-    setIsDemoMode(true);
-    setDemoRole(role);
-    setUser(role === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER);
-    setSessions((prev) => (prev.length > 0 ? prev : INITIAL_SESSIONS));
-    setActiveNav('chats');
-    setStreamError(null);
-  };
-
   const handleSwitchDemoRole = (role: 'user' | 'admin') => {
     setDemoRole(role);
-    setUser(role === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER);
+    const baseUser = role === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER;
+    setUser(
+      profileDisplayName ? { ...baseUser, name: profileDisplayName } : baseUser
+    );
     if (role !== 'admin' && activeNav === 'admin') {
       setActiveNav('quotas');
     } else if (role === 'admin' && activeNav === 'quotas') {
@@ -526,6 +561,14 @@ export default function App() {
     const trimmed = text.trim();
     if (!trimmed || isStreaming) return;
 
+    if (quotaBlockStatus.isBlocked) {
+      setStreamError(
+        quotaBlockStatus.message ??
+          'Лимит запросов исчерпан. Обратитесь к администратору для увеличения квоты.'
+      );
+      return;
+    }
+
     setStreamError(null);
     setLastSubmittedPrompt({ text: trimmed, attachments, attachmentDetails });
     const promptWithAttachments = buildPromptWithAttachments(
@@ -565,13 +608,16 @@ export default function App() {
 
       const targetSessionId = baseSession.id;
 
-      const historyForModel = [
-        ...baseSession.messages.map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })),
-        { role: 'user' as const, content: promptWithAttachments },
-      ];
+      const historyForModel = prependPersonalInstructionsToHistory(
+        [
+          ...baseSession.messages.map((m) => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          })),
+          { role: 'user' as const, content: promptWithAttachments },
+        ],
+        personalInstructions
+      );
 
       const updatedSession: ChatSession = {
         ...baseSession,
@@ -603,6 +649,29 @@ export default function App() {
             : u
         )
       );
+
+      const rollbackDemoQuotaIncrement = () => {
+        setAdminUsers((prev) =>
+          prev.map((u) =>
+            u.email === activeEmail
+              ? {
+                  ...u,
+                  quotas: {
+                    daily: {
+                      ...u.quotas.daily,
+                      used: Math.max(0, u.quotas.daily.used - 1),
+                    },
+                    monthly: {
+                      ...u.quotas.monthly,
+                      used: Math.max(0, u.quotas.monthly.used - 1),
+                    },
+                  },
+                }
+              : u
+          )
+        );
+      };
+
       setActiveNav('chats');
       setPromptValue('');
 
@@ -634,6 +703,9 @@ export default function App() {
           setIsStreaming(false);
           streamAbortRef.current = null;
           const finalContent = accumulatedReply.trim();
+          if (abortController.signal.aborted && !finalContent) {
+            rollbackDemoQuotaIncrement();
+          }
           setSessions((prev) =>
             prev.map((s) =>
               s.id === targetSessionId
@@ -656,6 +728,16 @@ export default function App() {
         (err) => {
           setIsStreaming(false);
           streamAbortRef.current = null;
+          if (err instanceof ApiError && err.quotas) {
+            const serverQuotas = err.quotas;
+            setAdminUsers((prev) =>
+              prev.map((u) =>
+                u.email === activeEmail ? { ...u, quotas: serverQuotas } : u
+              )
+            );
+          } else {
+            rollbackDemoQuotaIncrement();
+          }
           setStreamError(err.message);
           setSessions((prev) =>
             prev.map((s) =>
@@ -718,13 +800,16 @@ export default function App() {
         isStreaming: true,
       };
 
-      const historyForModel = [
-        ...currentSession.messages.map((m) => ({
-          role: m.role as 'user' | 'assistant',
-          content: m.content,
-        })),
-        { role: 'user' as const, content: promptWithAttachments },
-      ];
+      const historyForModel = prependPersonalInstructionsToHistory(
+        [
+          ...currentSession.messages.map((m) => ({
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+          })),
+          { role: 'user' as const, content: promptWithAttachments },
+        ],
+        personalInstructions
+      );
 
       setSessions((prev) =>
         prev.map((s) =>
@@ -802,6 +887,9 @@ export default function App() {
             setUser(null);
             return;
           }
+          if (err instanceof ApiError && err.quotas) {
+            setBackendQuotas(err.quotas);
+          }
           setStreamError(err.message);
           setSessions((prev) =>
             prev.map((s) =>
@@ -829,14 +917,18 @@ export default function App() {
         setUser(null);
         return;
       }
+      if (err instanceof ApiError && err.quotas) {
+        setBackendQuotas(err.quotas);
+      }
       setStreamError(
         err instanceof Error ? err.message : 'Ошибка отправки сообщения'
       );
+      refreshQuotas();
     }
   };
 
   const handleRetryLastPrompt = () => {
-    if (!lastSubmittedPrompt || isStreaming) return;
+    if (!lastSubmittedPrompt || isStreaming || quotaBlockStatus.isBlocked) return;
     handleSubmitPrompt(
       lastSubmittedPrompt.text,
       lastSubmittedPrompt.attachments,
@@ -897,23 +989,22 @@ export default function App() {
         theme={theme}
         onSelectTheme={handleSelectTheme}
         onLogin={handleLogin}
-        onEnterDemoMode={handleEnterDemoMode}
       />
     );
   }
 
   return (
-    <div className="h-screen overflow-hidden w-full bg-[#EEF1F7] dark:bg-[#070A12] text-[#111827] dark:text-slate-100 flex flex-col md:p-4 lg:p-5">
+    <div className="h-screen overflow-hidden w-full bg-white dark:bg-[#0E1322] text-[#0F172A] dark:text-slate-100 flex flex-col">
       {/* WCAG Skip Link for Keyboard Users */}
       <a
         href="#main-workspace"
-        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-4 focus:py-2 focus:rounded-xl focus:bg-[#5046E5] focus:text-white focus:text-sm focus:font-semibold focus:shadow-lg"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:px-4 focus:py-2 focus:rounded-xl focus:bg-[#4F46E5] focus:text-white focus:text-sm focus:font-semibold focus:shadow-lg"
       >
         Перейти к основному содержимому
       </a>
 
-      {/* Outer Dashboard Frame */}
-      <div className="flex-1 min-h-0 flex w-full max-w-[1440px] mx-auto md:rounded-[24px] overflow-hidden border border-[#E2E5EE] dark:border-slate-800/90 bg-white dark:bg-[#0E1322] shadow-[0_14px_44px_rgba(15,23,42,0.06)] dark:shadow-[0_14px_44px_rgba(0,0,0,0.45)] h-full">
+      {/* Full-Width Workspace Frame (maximum useful width without outer side margins) */}
+      <div className="flex-1 min-h-0 flex w-full h-full overflow-hidden bg-white dark:bg-[#0E1322]">
         {/* Left Sidebar */}
         <Sidebar
           activeNav={activeNav}
@@ -935,6 +1026,8 @@ export default function App() {
           onDeleteSession={handleDeleteSession}
           user={user}
           quotas={quotas}
+          avatarColor={profileAvatarColor}
+          onOpenProfile={() => setProfileModalOpen(true)}
           onLogout={handleLogout}
           isDemoMode={isDemoMode}
           onSwitchDemoRole={handleSwitchDemoRole}
@@ -961,9 +1054,6 @@ export default function App() {
             onNewChat={handleNewChat}
             onOpenMobileMenu={() => setMobileMenuOpen(true)}
             exportSession={activeSession}
-            isDemoMode={isDemoMode}
-            userRole={user?.role}
-            onSwitchDemoRole={handleSwitchDemoRole}
           />
 
           <main
@@ -974,40 +1064,42 @@ export default function App() {
             }`}
           >
             {showNewChatWelcome ? (
-              <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-6 py-8 md:py-12">
+              <div className="flex-1 flex flex-col items-center justify-center px-4 sm:px-8 py-8 md:py-10 w-full max-w-[1040px] mx-auto">
                 {/* Greeting Hero */}
-                <div className="text-center max-w-[540px] mx-auto mb-8">
-                  <h2 className="text-[30px] sm:text-[34px] font-bold tracking-tight text-[#111827] dark:text-white flex items-center justify-center gap-2.5">
+                <div className="text-center max-w-[580px] mx-auto mb-7">
+                  <h2 className="text-[28px] sm:text-[32px] font-bold tracking-tight text-[#0F172A] dark:text-white flex items-center justify-center gap-2.5">
                     <span>Здравствуйте!</span>
                     <span role="img" aria-label="Приветствие">
                       👋
                     </span>
                   </h2>
-                  <p className="mt-3 text-[15px] sm:text-[15.5px] leading-[1.6] text-[#4B5563] dark:text-slate-300 text-balance">
+                  <p className="mt-2.5 text-[15px] leading-[1.6] text-[#475569] dark:text-slate-300 text-balance">
                     Задавайте вопросы, анализируйте информацию
                     <br className="hidden sm:inline" /> и решайте рабочие задачи — в одном чате.
                   </p>
                 </div>
 
-                {/* Main Composer Card */}
+                {/* Single Clean Bottom Composer Card */}
                 <ChatComposer
                   promptValue={promptValue}
                   onPromptChange={setPromptValue}
                   onSubmitPrompt={handleSubmitPrompt}
                   onOpenPromptLibrary={() => setPromptLibraryOpen(true)}
                   onOpenModelParams={() => setModelParamsOpen(true)}
+                  quotaBlockStatus={quotaBlockStatus}
+                  onOpenQuotasView={handleOpenQuotasView}
                 />
 
-                {streamError && (
+                {streamError && !quotaBlockStatus.isBlocked && (
                   <div
                     role="alert"
-                    className="mt-4 w-full max-w-[680px] p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300 text-center"
+                    className="mt-4 w-full max-w-[820px] p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300 text-center"
                   >
                     {streamError}
                   </div>
                 )}
 
-                {/* Quick Prompts 3 + 2 Grid */}
+                {/* Quick Prompts Grid */}
                 <QuickPrompts
                   prompts={QUICK_PROMPTS}
                   onSelectQuickPrompt={handleSelectQuickPrompt}
@@ -1027,6 +1119,8 @@ export default function App() {
                 onAbortStream={handleAbortStream}
                 streamError={streamError}
                 onRetryLastPrompt={lastSubmittedPrompt ? handleRetryLastPrompt : undefined}
+                quotaBlockStatus={quotaBlockStatus}
+                onOpenQuotasView={handleOpenQuotasView}
               />
             ) : (
               <WorkspaceSectionView
@@ -1093,6 +1187,32 @@ export default function App() {
           setActiveNav('chats');
         }}
         onClose={() => setCommandSearchOpen(false)}
+      />
+
+      <ProfileModal
+        open={profileModalOpen}
+        user={user}
+        quotas={quotas}
+        personalInstructions={personalInstructions}
+        avatarColor={profileAvatarColor}
+        onSaveProfile={async ({ name, personalInstructions: nextInstructions, avatarColor }) => {
+          setProfileDisplayName(name);
+          setPersonalInstructions(nextInstructions);
+          setProfileAvatarColor(avatarColor);
+          setUser((prev) => (prev ? { ...prev, name } : prev));
+          if (!isDemoMode) {
+            try {
+              const updated = await authApi.updateProfile({
+                name,
+                personalInstructions: nextInstructions,
+              });
+              setUser((prev) => (prev ? { ...prev, ...updated.user } : updated.user));
+            } catch {
+              // Keep local state if backend endpoint is unreachable in standalone mode
+            }
+          }
+        }}
+        onClose={() => setProfileModalOpen(false)}
       />
     </div>
   );

@@ -4,6 +4,11 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  evaluateMessagesSecurityGuardrail,
+  isSecurityRestrictedOutput,
+  SECURITY_REFUSAL_MESSAGE,
+} from './backend/src/services/instruction.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -515,6 +520,113 @@ async function* streamChatWithFreeLlm(
   );
 }
 
+interface PreviewUserRecord {
+  id: number;
+  email: string;
+  name: string;
+  role: 'user' | 'admin';
+  personalInstructions: string;
+  quotas: {
+    daily: { used: number; limit: number | null };
+    monthly: { used: number; limit: number | null };
+  };
+}
+
+interface PreviewMessageRecord {
+  id: number;
+  conversation_id: number;
+  role: 'user' | 'assistant' | 'system';
+  text: string;
+  created_at: string;
+}
+
+interface PreviewConversationRecord {
+  id: number;
+  user_id: number;
+  title: string | null;
+  created_at: string;
+  last_message_at: string | null;
+  messages: PreviewMessageRecord[];
+}
+
+const previewUsers = new Map<string, PreviewUserRecord>([
+  [
+    'admin@ars_llm.local',
+    {
+      id: 1,
+      email: 'admin@ars_llm.local',
+      name: 'Администратор ИТ',
+      role: 'admin',
+      personalInstructions: '',
+      quotas: {
+        daily: { used: 3, limit: 100 },
+        monthly: { used: 42, limit: 2000 },
+      },
+    },
+  ],
+  [
+    'employee@company.kz',
+    {
+      id: 2,
+      email: 'employee@company.kz',
+      name: 'Сотрудник',
+      role: 'user',
+      personalInstructions: '',
+      quotas: {
+        daily: { used: 4, limit: 20 },
+        monthly: { used: 38, limit: 500 },
+      },
+    },
+  ],
+]);
+
+const previewSessions = new Map<string, string>(); // token -> email
+const previewConversations = new Map<number, PreviewConversationRecord>();
+let nextPreviewUserId = 3;
+let nextPreviewConvId = 101;
+let nextPreviewMsgId = 1001;
+
+function deriveDefaultDisplayName(email: string, role: 'user' | 'admin'): string {
+  if (role === 'admin') return 'Администратор ИТ';
+  const localPart = email.split('@')[0] || 'Сотрудник';
+  const formatted = localPart
+    .replace(/[._-]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+  return formatted || 'Сотрудник';
+}
+
+function getPreviewSessionUser(req: Request): PreviewUserRecord | null {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    const email = previewSessions.get(token);
+    if (email && previewUsers.has(email)) {
+      return previewUsers.get(email) ?? null;
+    }
+  }
+
+  const cookieHeader = req.headers.cookie;
+  if (typeof cookieHeader === 'string') {
+    const match = cookieHeader
+      .split(';')
+      .map((part) => part.trim())
+      .find((part) => part.startsWith('ars_session='));
+    if (match) {
+      const token = decodeURIComponent(match.slice('ars_session='.length));
+      const email = previewSessions.get(token);
+      if (email && previewUsers.has(email)) {
+        return previewUsers.get(email) ?? null;
+      }
+    }
+  }
+
+  return null;
+}
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
@@ -528,6 +640,466 @@ async function startServer() {
       providerConfigured: Boolean(cfg.FREELLM_API_BASE_URL && cfg.FREELLM_API_KEY),
       model: cfg.FREELLM_MODEL || 'auto',
     });
+  });
+
+  // --- Auth & Profile API (/api/v1/auth/*) ---
+  app.post('/api/v1/auth/login', async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const rawPassword = typeof body.password === 'string' ? body.password : '';
+
+    if (!rawEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail)) {
+      res.status(400).json({
+        error: { message: 'Укажите корректный корпоративный адрес электронной почты.' },
+      });
+      return;
+    }
+
+    if (!rawPassword) {
+      res.status(400).json({
+        error: { message: 'Введите пароль учётной записи.' },
+      });
+      return;
+    }
+
+    let userRecord = previewUsers.get(rawEmail);
+    if (!userRecord) {
+      const isAdminEmail =
+        rawEmail === (process.env.ADMIN_BOOTSTRAP_EMAIL || 'admin@ars_llm.local').toLowerCase() ||
+        rawEmail.startsWith('admin@');
+      const role: 'user' | 'admin' = isAdminEmail ? 'admin' : 'user';
+      userRecord = {
+        id: nextPreviewUserId++,
+        email: rawEmail,
+        name: deriveDefaultDisplayName(rawEmail, role),
+        role,
+        personalInstructions: '',
+        quotas: isAdminEmail
+          ? { daily: { used: 2, limit: 100 }, monthly: { used: 24, limit: 2000 } }
+          : { daily: { used: 4, limit: 20 }, monthly: { used: 38, limit: 500 } },
+      };
+      previewUsers.set(rawEmail, userRecord);
+    }
+
+    const sessionToken = randomUUID();
+    previewSessions.set(sessionToken, userRecord.email);
+
+    res.setHeader(
+      'Set-Cookie',
+      `ars_session=${encodeURIComponent(sessionToken)}; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=86400`
+    );
+
+    res.status(200).json({
+      user: {
+        id: userRecord.id,
+        email: userRecord.email,
+        name: userRecord.name,
+        role: userRecord.role,
+        quotas: userRecord.quotas,
+      },
+      quotas: userRecord.quotas,
+      sessionToken,
+    });
+  });
+
+  app.post('/api/v1/auth/logout', (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization;
+    if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+      previewSessions.delete(authHeader.slice(7).trim());
+    }
+    res.setHeader(
+      'Set-Cookie',
+      'ars_session=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0'
+    );
+    res.status(200).json({ ok: true });
+  });
+
+  app.get('/api/v1/auth/me', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({
+        error: { message: 'Сессия не авторизована.' },
+      });
+      return;
+    }
+
+    res.status(200).json({
+      user: {
+        id: userRecord.id,
+        email: userRecord.email,
+        name: userRecord.name,
+        role: userRecord.role,
+        quotas: userRecord.quotas,
+      },
+      quotas: userRecord.quotas,
+    });
+  });
+
+  app.get('/api/v1/auth/quotas', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({
+        error: { message: 'Сессия не авторизована.' },
+      });
+      return;
+    }
+
+    res.status(200).json({
+      ...userRecord.quotas,
+      quotas: userRecord.quotas,
+    });
+  });
+
+  app.all('/api/v1/auth/quotas', (_req: Request, res: Response) => {
+    res.status(403).json({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'Сотрудник не может изменять свои квоты запросов. Обратитесь к администратору.',
+      },
+    });
+  });
+
+  // --- Admin API (/api/v1/admin/*) ---
+  app.get('/api/v1/admin/users', (req: Request, res: Response) => {
+    const actor = getPreviewSessionUser(req);
+    if (!actor) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
+      return;
+    }
+    if (actor.role !== 'admin') {
+      res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Недостаточно прав. Только администратор может управлять квотами.',
+        },
+      });
+      return;
+    }
+    const users = Array.from(previewUsers.values()).map((u) => ({
+      id: u.id,
+      email: u.email,
+      name: u.name,
+      role: u.role,
+      created_at: new Date().toISOString(),
+      quotas: u.quotas,
+    }));
+    res.status(200).json({ users });
+  });
+
+  app.get('/api/v1/admin/usage', (req: Request, res: Response) => {
+    const actor = getPreviewSessionUser(req);
+    if (!actor) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
+      return;
+    }
+    if (actor.role !== 'admin') {
+      res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Недостаточно прав. Только администратор может просматривать статистику.',
+        },
+      });
+      return;
+    }
+    res.status(200).json({
+      summary: [{ event_type: 'model_call', count: 42 }],
+      daily: [],
+      events: [],
+    });
+  });
+
+  app.put('/api/v1/admin/users/:id/quotas', (req: Request, res: Response) => {
+    const actor = getPreviewSessionUser(req);
+    if (!actor) {
+      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
+      return;
+    }
+    if (actor.role !== 'admin') {
+      res.status(403).json({
+        error: {
+          code: 'FORBIDDEN',
+          message: 'Недостаточно прав. Сотрудник не может изменять квоты запросов.',
+        },
+      });
+      return;
+    }
+
+    const targetId = Number(req.params.id);
+    const targetUser = Array.from(previewUsers.values()).find((u) => u.id === targetId);
+    if (!targetUser) {
+      res.status(404).json({ error: { message: 'Пользователь не найден.' } });
+      return;
+    }
+
+    const { daily_limit, monthly_limit } = req.body ?? {};
+    if (
+      daily_limit !== null &&
+      daily_limit !== undefined &&
+      (typeof daily_limit !== 'number' || !Number.isInteger(daily_limit) || daily_limit < 0)
+    ) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Дневной лимит должен быть целым неотрицательным числом или null.',
+        },
+      });
+      return;
+    }
+    if (
+      monthly_limit !== null &&
+      monthly_limit !== undefined &&
+      (typeof monthly_limit !== 'number' || !Number.isInteger(monthly_limit) || monthly_limit < 0)
+    ) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Месячный лимит должен быть целым неотрицательным числом или null.',
+        },
+      });
+      return;
+    }
+    if (
+      typeof daily_limit === 'number' &&
+      typeof monthly_limit === 'number' &&
+      monthly_limit < daily_limit
+    ) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Месячный лимит не может быть меньше дневного лимита.',
+        },
+      });
+      return;
+    }
+
+    targetUser.quotas = {
+      daily: {
+        used: targetUser.quotas.daily.used,
+        limit: daily_limit === undefined ? targetUser.quotas.daily.limit : daily_limit,
+      },
+      monthly: {
+        used: targetUser.quotas.monthly.used,
+        limit: monthly_limit === undefined ? targetUser.quotas.monthly.limit : monthly_limit,
+      },
+    };
+    previewUsers.set(targetUser.email, targetUser);
+
+    res.status(200).json({
+      user_id: targetUser.id,
+      quotas: targetUser.quotas,
+      message: 'Quota limits updated.',
+    });
+  });
+
+  app.patch('/api/v1/auth/profile', async (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({
+        error: { message: 'Сессия не авторизована.' },
+      });
+      return;
+    }
+
+    const { validateProfileSelfUpdatePayload } = await import(
+      './backend/src/services/instruction.js'
+    );
+    const validation = validateProfileSelfUpdatePayload(req.body, {
+      email: userRecord.email,
+      role: userRecord.role,
+    });
+
+    if (!validation.ok) {
+      res.status(validation.status).json({
+        error: { message: validation.error },
+      });
+      return;
+    }
+
+    userRecord.name = validation.name;
+    userRecord.personalInstructions = validation.personalInstructions;
+    previewUsers.set(userRecord.email, userRecord);
+
+    res.status(200).json({
+      user: {
+        id: userRecord.id,
+        email: userRecord.email,
+        name: userRecord.name,
+        role: userRecord.role,
+        quotas: userRecord.quotas,
+      },
+      personalInstructions: userRecord.personalInstructions,
+    });
+  });
+
+  // --- Conversations & Messages API (/api/v1/conversations/*, /api/v1/messages/*) ---
+  app.get('/api/v1/conversations', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const list = Array.from(previewConversations.values())
+      .filter((c) => c.user_id === userRecord.id)
+      .sort((a, b) => (b.last_message_at || b.created_at).localeCompare(a.last_message_at || a.created_at));
+    res.status(200).json(list);
+  });
+
+  app.post('/api/v1/conversations', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const rawTitle = typeof req.body?.title === 'string' ? req.body.title.trim() : null;
+    const now = new Date().toISOString();
+    const conv: PreviewConversationRecord = {
+      id: nextPreviewConvId++,
+      user_id: userRecord.id,
+      title: rawTitle || 'Новый диалог',
+      created_at: now,
+      last_message_at: now,
+      messages: [],
+    };
+    previewConversations.set(conv.id, conv);
+    res.status(201).json(conv);
+  });
+
+  app.get('/api/v1/conversations/:id', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const convId = Number(req.params.id);
+    const conv = previewConversations.get(convId);
+    if (!conv || conv.user_id !== userRecord.id) {
+      res.status(404).json({ error: { message: 'Диалог не найден.' } });
+      return;
+    }
+    res.status(200).json(conv);
+  });
+
+  app.patch('/api/v1/conversations/:id', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const convId = Number(req.params.id);
+    const conv = previewConversations.get(convId);
+    if (!conv || conv.user_id !== userRecord.id) {
+      res.status(404).json({ error: { message: 'Диалог не найден.' } });
+      return;
+    }
+    if (typeof req.body?.title === 'string' && req.body.title.trim()) {
+      conv.title = req.body.title.trim();
+    }
+    res.status(200).json(conv);
+  });
+
+  app.delete('/api/v1/conversations/:id', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const convId = Number(req.params.id);
+    const conv = previewConversations.get(convId);
+    if (conv && conv.user_id === userRecord.id) {
+      previewConversations.delete(convId);
+    }
+    res.status(204).end();
+  });
+
+  app.get('/api/v1/messages', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const convId = Number(req.query.conversation_id);
+    const conv = previewConversations.get(convId);
+    if (!conv || conv.user_id !== userRecord.id) {
+      res.status(200).json([]);
+      return;
+    }
+    res.status(200).json(conv.messages);
+  });
+
+  app.post('/api/v1/messages', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const convId = Number(req.body?.conversation_id);
+    const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
+    const role: 'user' | 'assistant' | 'system' =
+      req.body?.role === 'assistant' || req.body?.role === 'system' ? req.body.role : 'user';
+
+    if (!text) {
+      res.status(400).json({ error: { message: 'Текст сообщения не может быть пустым.' } });
+      return;
+    }
+
+    // Check quota before accepting user prompt turn (actual reservation happens in /api/v1/chat/completions)
+    if (role === 'user') {
+      const { daily, monthly } = userRecord.quotas;
+      if (daily.limit !== null && daily.used >= daily.limit) {
+        res.status(429).json({
+          error: {
+            code: 'QUOTA_EXCEEDED',
+            reason: 'daily_limit_exceeded',
+            period: 'daily',
+            message: `Исчерпан дневной лимит запросов (${daily.used} из ${daily.limit}). Обратитесь к администратору для увеличения квоты.`,
+            contact_admin: true,
+            quotas: userRecord.quotas,
+          },
+          quotas: userRecord.quotas,
+        });
+        return;
+      }
+      if (monthly.limit !== null && monthly.used >= monthly.limit) {
+        res.status(429).json({
+          error: {
+            code: 'QUOTA_EXCEEDED',
+            reason: 'monthly_limit_exceeded',
+            period: 'monthly',
+            message: `Исчерпан месячный лимит запросов (${monthly.used} из ${monthly.limit}). Обратитесь к администратору для увеличения квоты.`,
+            contact_admin: true,
+            quotas: userRecord.quotas,
+          },
+          quotas: userRecord.quotas,
+        });
+        return;
+      }
+    }
+
+    let conv = previewConversations.get(convId);
+    const now = new Date().toISOString();
+    if (!conv) {
+      conv = {
+        id: Number.isFinite(convId) && convId > 0 ? convId : nextPreviewConvId++,
+        user_id: userRecord.id,
+        title: text.slice(0, 60),
+        created_at: now,
+        last_message_at: now,
+        messages: [],
+      };
+      previewConversations.set(conv.id, conv);
+    }
+
+    const msg: PreviewMessageRecord = {
+      id: nextPreviewMsgId++,
+      conversation_id: conv.id,
+      role,
+      text,
+      created_at: now,
+    };
+    conv.messages.push(msg);
+    conv.last_message_at = now;
+
+    res.status(201).json(msg);
   });
 
   app.post('/api/v1/chat/completions', async (req: Request, res: Response) => {
@@ -578,11 +1150,122 @@ async function startServer() {
       return;
     }
 
+    // Atomically check and reserve quota for authenticated session user BEFORE calling FreeLLMAPI
+    const sessionUser = getPreviewSessionUser(req);
+    let reservationSettled = false;
+    const releasePreviewReservation = () => {
+      if (!sessionUser || reservationSettled) return;
+      reservationSettled = true;
+      sessionUser.quotas.daily.used = Math.max(0, sessionUser.quotas.daily.used - 1);
+      sessionUser.quotas.monthly.used = Math.max(0, sessionUser.quotas.monthly.used - 1);
+    };
+    const commitPreviewReservation = () => {
+      if (!sessionUser || reservationSettled) return;
+      reservationSettled = true;
+    };
+
+    if (sessionUser) {
+      const { daily, monthly } = sessionUser.quotas;
+      if (daily.limit !== null && daily.used >= daily.limit) {
+        res.status(429).json({
+          error: {
+            code: 'QUOTA_EXCEEDED',
+            reason: 'daily_limit_exceeded',
+            period: 'daily',
+            message: `Исчерпан дневной лимит запросов (${daily.used} из ${daily.limit}). Обратитесь к администратору для увеличения квоты.`,
+            contact_admin: true,
+            quotas: sessionUser.quotas,
+          },
+          quotas: sessionUser.quotas,
+        });
+        return;
+      }
+      if (monthly.limit !== null && monthly.used >= monthly.limit) {
+        res.status(429).json({
+          error: {
+            code: 'QUOTA_EXCEEDED',
+            reason: 'monthly_limit_exceeded',
+            period: 'monthly',
+            message: `Исчерпан месячный лимит запросов (${monthly.used} из ${monthly.limit}). Обратитесь к администратору для увеличения квоты.`,
+            contact_admin: true,
+            quotas: sessionUser.quotas,
+          },
+          quotas: sessionUser.quotas,
+        });
+        return;
+      }
+      // Atomically reserve 1 unit in both daily and monthly quotas prior to model call
+      sessionUser.quotas.daily.used += 1;
+      sessionUser.quotas.monthly.used += 1;
+    }
+
+    const guardrailResult = evaluateMessagesSecurityGuardrail(validMessages);
+    const completionId = `chatcmpl-${randomUUID()}`;
+    const created = Math.floor(Date.now() / 1000);
+
+    if (guardrailResult.blocked) {
+      commitPreviewReservation();
+      if (stream) {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders();
+
+        const refusalChunk = {
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          choices: [
+            {
+              index: 0,
+              delta: { content: guardrailResult.refusalMessage },
+              finish_reason: null,
+            },
+          ],
+        };
+        const doneChunk = {
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'stop',
+            },
+          ],
+        };
+        res.write(`data: ${JSON.stringify(refusalChunk)}\n\n`);
+        res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
+
+      res.status(200).json({
+        id: completionId,
+        object: 'chat.completion',
+        created,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: guardrailResult.refusalMessage,
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        quotas: sessionUser?.quotas,
+      });
+      return;
+    }
+
     const corporateInstruction = getCorporateInstruction();
     const trustedMessages = buildTrustedMessages(corporateInstruction, validMessages);
     const runtimeConfig = loadRuntimeConfig();
-    const completionId = `chatcmpl-${randomUUID()}`;
-    const created = Math.floor(Date.now() / 1000);
 
     if (stream) {
       res.statusCode = 200;
@@ -599,7 +1282,6 @@ async function startServer() {
         }
       });
 
-      // Send SSE comment heartbeat every 5s so Cloud Run / proxies never drop the stream during model thinking or retry
       const heartbeatInterval = setInterval(() => {
         if (!res.writableEnded && !abortController.signal.aborted) {
           res.write(': keep-alive\n\n');
@@ -607,12 +1289,63 @@ async function startServer() {
       }, 5_000);
 
       try {
+        let inspectionBuffer = '';
+        let bufferFlushed = false;
+        let emittedChars = 0;
+
         for await (const token of streamChatWithFreeLlm(
           trustedMessages,
           abortController.signal,
           runtimeConfig
         )) {
-          if (res.writableEnded || abortController.signal.aborted) break;
+          if (res.writableEnded || abortController.signal.aborted) {
+            throw new Error('Request aborted');
+          }
+
+          if (!bufferFlushed) {
+            inspectionBuffer += token;
+            if (isSecurityRestrictedOutput(inspectionBuffer)) {
+              abortController.abort();
+              const refusalChunk = {
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { content: SECURITY_REFUSAL_MESSAGE },
+                    finish_reason: null,
+                  },
+                ],
+              };
+              res.write(`data: ${JSON.stringify(refusalChunk)}\n\n`);
+              emittedChars += SECURITY_REFUSAL_MESSAGE.length;
+              bufferFlushed = true;
+              inspectionBuffer = '';
+              break;
+            }
+            if (inspectionBuffer.length >= 260) {
+              bufferFlushed = true;
+              emittedChars += inspectionBuffer.length;
+              const initialChunk = {
+                id: completionId,
+                object: 'chat.completion.chunk',
+                created,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { content: inspectionBuffer },
+                    finish_reason: null,
+                  },
+                ],
+              };
+              res.write(`data: ${JSON.stringify(initialChunk)}\n\n`);
+              inspectionBuffer = '';
+            }
+            continue;
+          }
+
+          emittedChars += token.length;
           const chunk = {
             id: completionId,
             object: 'chat.completion.chunk',
@@ -627,6 +1360,36 @@ async function startServer() {
           };
           res.write(`data: ${JSON.stringify(chunk)}\n\n`);
         }
+
+        if (abortController.signal.aborted) {
+          throw new Error('Request aborted');
+        }
+
+        if (!bufferFlushed && inspectionBuffer.length > 0 && !res.writableEnded) {
+          const safeOut = isSecurityRestrictedOutput(inspectionBuffer)
+            ? SECURITY_REFUSAL_MESSAGE
+            : inspectionBuffer;
+          emittedChars += safeOut.length;
+          const finalContentChunk = {
+            id: completionId,
+            object: 'chat.completion.chunk',
+            created,
+            choices: [
+              {
+                index: 0,
+                delta: { content: safeOut },
+                finish_reason: null,
+              },
+            ],
+          };
+          res.write(`data: ${JSON.stringify(finalContentChunk)}\n\n`);
+        }
+
+        if (emittedChars === 0) {
+          throw new Error('Empty stream response');
+        }
+
+        commitPreviewReservation();
 
         if (!res.writableEnded && !abortController.signal.aborted) {
           const doneChunk = {
@@ -645,6 +1408,7 @@ async function startServer() {
           res.write('data: [DONE]\n\n');
         }
       } catch (err) {
+        releasePreviewReservation();
         if (!res.writableEnded && !abortController.signal.aborted) {
           const errMsg =
             err instanceof Error ? err.message : 'Service temporarily unavailable';
@@ -655,6 +1419,7 @@ async function startServer() {
           );
         }
       } finally {
+        releasePreviewReservation();
         clearInterval(heartbeatInterval);
         if (!res.writableEnded) {
           res.end();
@@ -664,7 +1429,9 @@ async function startServer() {
     }
 
     try {
-      const reply = await chatWithFreeLlm(trustedMessages, runtimeConfig);
+      const rawReply = await chatWithFreeLlm(trustedMessages, runtimeConfig);
+      const reply = isSecurityRestrictedOutput(rawReply) ? SECURITY_REFUSAL_MESSAGE : rawReply;
+      commitPreviewReservation();
       res.status(200).json({
         id: completionId,
         object: 'chat.completion',
@@ -679,8 +1446,10 @@ async function startServer() {
             finish_reason: 'stop',
           },
         ],
+        quotas: sessionUser?.quotas,
       });
     } catch (err) {
+      releasePreviewReservation();
       res.status(502).json({
         error: {
           code: 'BAD_GATEWAY',
@@ -688,6 +1457,8 @@ async function startServer() {
             err instanceof Error ? err.message : 'Service temporarily unavailable',
         },
       });
+    } finally {
+      releasePreviewReservation();
     }
   });
 

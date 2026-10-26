@@ -200,8 +200,12 @@ function classifyNonOkResponse(response: Response): {
 export async function chatWithFreeLlm(
   messages: ChatMessage[],
   config: FreeLlmRuntimeConfig = env,
-  fetchFn: typeof fetch = fetch
+  fetchFn: typeof fetch = fetch,
+  signal?: AbortSignal
 ): Promise<string> {
+  if (signal?.aborted) {
+    throw new Error("Request aborted");
+  }
   const endpoints = resolveProviderEndpoints(config);
   if (endpoints.length === 0) {
     throw new Error("FreeLLMAPI is not configured");
@@ -210,6 +214,9 @@ export async function chatWithFreeLlm(
   let lastError: Error | null = null;
 
   for (let i = 0; i < endpoints.length; i++) {
+    if (signal?.aborted) {
+      throw new Error("Request aborted");
+    }
     const ep = endpoints[i];
     const hasFallback = i < endpoints.length - 1;
 
@@ -222,7 +229,9 @@ export async function chatWithFreeLlm(
           messages,
           stream: false,
         }),
-        signal: AbortSignal.timeout(ep.timeoutMs),
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(ep.timeoutMs)])
+          : AbortSignal.timeout(ep.timeoutMs),
       });
 
       const data = (await response.json().catch(() => null)) as
@@ -257,6 +266,9 @@ export async function chatWithFreeLlm(
 
       return content;
     } catch (err) {
+      if (signal?.aborted) {
+        throw err instanceof Error ? err : new Error("Request aborted");
+      }
       const normalizedErr =
         err instanceof Error ? err : new Error("FreeLLMAPI request failed");
       if (hasFallback && !normalizedErr.message.includes("authentication failed")) {
@@ -276,6 +288,9 @@ export async function* streamChatWithFreeLlm(
   config: FreeLlmRuntimeConfig = env,
   fetchFn: typeof fetch = fetch
 ): AsyncGenerator<string> {
+  if (signal?.aborted) {
+    throw new Error("Request aborted");
+  }
   const endpoints = resolveProviderEndpoints(config);
   if (endpoints.length === 0) {
     throw new Error("FreeLLMAPI is not configured");
@@ -285,6 +300,9 @@ export async function* streamChatWithFreeLlm(
   let lastError: Error | null = null;
 
   for (let i = 0; i < endpoints.length; i++) {
+    if (signal?.aborted) {
+      throw new Error("Request aborted");
+    }
     const ep = endpoints[i];
     const hasFallback = i < endpoints.length - 1;
 
@@ -353,7 +371,13 @@ export async function* streamChatWithFreeLlm(
 
   try {
     while (true) {
+      if (signal?.aborted) {
+        throw new Error("Request aborted");
+      }
       const { value, done } = await reader.read();
+      if (signal?.aborted) {
+        throw new Error("Request aborted");
+      }
 
       if (done) break;
 

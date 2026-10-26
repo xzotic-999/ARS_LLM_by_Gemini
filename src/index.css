@@ -27,12 +27,17 @@
 /* Custom minimal theme-harmonized scrollbars (Light & Dark modes, no native Windows arrow buttons) */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(148, 163, 184, 0.45) transparent;
+  scrollbar-color: #CBD5E1 transparent;
 }
 
 .dark * {
   scrollbar-width: thin;
   scrollbar-color: rgba(71, 85, 105, 0.6) transparent;
+}
+
+.modal-scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #CBD5E1 transparent;
 }
 
 *::-webkit-scrollbar {
@@ -126,3 +131,26 @@ html.theme-switching *::after {
   outline: 2px solid #818CF8;
   outline-offset: 2px;
 }
+
+/* Restrained corporate entrance animation (fade + subtle translate) */
+@keyframes ars-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: ars-fade-up 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up {
+    animation: none !important;
+  }
+}
+
