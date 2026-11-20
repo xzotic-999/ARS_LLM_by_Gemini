@@ -141,10 +141,10 @@ function renderSyntaxHighlightedLine(
 /**
  * Fenced Code Block component with header, language badge and copy action
  */
-const CodeBlockItem: React.FC<{
+const CodeBlockItem = React.memo<{
   code: string;
   language: string;
-}> = ({ code, language }) => {
+}>(({ code, language }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -195,7 +195,7 @@ const CodeBlockItem: React.FC<{
       </pre>
     </div>
   );
-};
+});
 
 /**
  * Interactive Markdown Table with alignment, number formatting and CSV/TSV copy
@@ -204,11 +204,11 @@ interface TableColumnAlign {
   align: 'left' | 'center' | 'right';
 }
 
-const MarkdownTableItem: React.FC<{
+const MarkdownTableItem = React.memo<{
   headers: string[];
   alignments: TableColumnAlign[];
   rows: string[][];
-}> = ({ headers, alignments, rows }) => {
+}>(({ headers, alignments, rows }) => {
   const [copied, setCopied] = useState(false);
 
   const handleCopyTable = () => {
@@ -316,7 +316,7 @@ const MarkdownTableItem: React.FC<{
       </div>
     </div>
   );
-};
+});
 
 /**
  * Parses inline Markdown tokens into semantic React elements:
@@ -424,7 +424,7 @@ export function renderInlineMarkdown(text: string, keyPrefix: string): React.Rea
  * - Formulas ($$math$$ block and $math$ inline)
  * - Blockquotes and horizontal rules
  */
-export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => {
+export const MarkdownContent = React.memo<MarkdownContentProps>(({ content }) => {
   const normalized = (content || '').replace(/\r\n/g, '\n');
 
   // Split by fenced code blocks (```lang ... ```) and block math ($$ ... $$)
@@ -741,4 +741,4 @@ export const MarkdownContent: React.FC<MarkdownContentProps> = ({ content }) => 
   });
 
   return <div className="space-y-1.5 text-[15px] sm:text-[15.5px] md:text-[16px] text-slate-800 dark:text-slate-200 font-sans leading-[1.7] break-words">{elements}</div>;
-};
+});

@@ -16,7 +16,7 @@ interface TopBarProps {
   exportSession: ChatSession | null;
 }
 
-export const TopBar: React.FC<TopBarProps> = ({
+export const TopBar = React.memo<TopBarProps>(({
   title,
   theme,
   onSelectTheme,
@@ -125,4 +125,4 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
     </header>
   );
-};
+});

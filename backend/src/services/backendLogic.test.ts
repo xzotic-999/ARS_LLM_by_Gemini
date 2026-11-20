@@ -623,7 +623,7 @@ test("Plesk + Neon PostgreSQL: validateEnvConfig parses quoted DATABASE_URL with
     DB_URL: "postgresql://ars_llm_user:CHANGE_ME_POSTGRES_PASSWORD@postgres:5432/ars_llm_db",
     POSTGRES_SSL_REJECT_UNAUTHORIZED: "false",
     SESSION_SECRET: '"a_very_strong_production_session_secret_at_least_32_bytes"',
-    FREELLM_API_BASE_URL: '"https://v7skvft7-31415.euw.devtunnels.ms/v1"',
+    FREELLM_API_BASE_URL: '"https://freellm-gateway.company.kz/v1"',
     FREELLM_API_KEY: '"sk-live-freellm-production-key"',
     ADMIN_BOOTSTRAP_EMAIL: '"admin@arsllm.ngtech.kz"',
     ADMIN_BOOTSTRAP_PASSWORD: '"StrongAdminPass_2026!"',
@@ -661,7 +661,7 @@ test("Plesk + Neon PostgreSQL: validateEnvConfig parses quoted DATABASE_URL with
     DATABASE_URL:
       "postgresql://neondb_owner:NeonStrongSecret_2026!@ep-cool-darkness-123456-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require",
     SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
-    FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+    FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
     FREELLM_API_KEY: "sk-live-freellm-production-key",
     ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
     ADMIN_BOOTSTRAP_PASSWORD: "StrongAdminPass_2026!",
@@ -681,7 +681,7 @@ test("Plesk + Neon PostgreSQL: validateEnvConfig parses quoted DATABASE_URL with
         DATABASE_URL: "postgresql://neondb_owner@ep-cool-darkness.eu-central-1.aws.neon.tech/neondb",
         POSTGRES_PASSWORD: "FallbackPasswordShouldNotBeUsed_2026!",
         SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
-        FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
         FREELLM_API_KEY: "sk-live-freellm-production-key",
         ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
         ADMIN_BOOTSTRAP_PASSWORD: "StrongAdminPass_2026!",
@@ -2082,6 +2082,293 @@ test("Legacy Excel (.xls) Support: extracts single-sheet and multi-sheet OLE2/BI
     messagesForModel[0].content.includes("Депо Алматы-1 | 2026-10-22 | 48 | 18450.75")
   );
 });
+
+test("FreeLLM production hardening: env rejects missing/devtunnels URLs, headers gate tunnel header, and stream parser handles edge formats", async () => {
+  const { validateEnvConfig } = await import("../config/env.js");
+  const {
+    buildFreeLlmHeaders,
+    normalizeFreeLlmBaseUrl,
+    streamChatWithFreeLlm,
+    verifyFreeLlmConnection,
+  } = await import("./freeLlm.js");
+
+  // 1. Missing FREELLM_API_BASE_URL in production must throw instead of falling back to Dev Tunnel
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://u:StrongPass_2026!@ep-db.neon.tech/db?sslmode=require",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_KEY: "real_prod_freellm_key",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /FREELLM_API_BASE_URL is required in production/
+  );
+
+  // 2. VS Code Dev Tunnel URLs are rejected in production for both primary and fallback endpoints
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://u:StrongPass_2026!@ep-db.neon.tech/db?sslmode=require",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_BASE_URL: "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+        FREELLM_API_KEY: "real_prod_freellm_key",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /cannot use a VS Code Dev Tunnel \(devtunnels\.ms\)/
+  );
+
+  assert.throws(
+    () =>
+      validateEnvConfig({
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://u:StrongPass_2026!@ep-db.neon.tech/db?sslmode=require",
+        SESSION_SECRET: "a_very_strong_production_session_secret_at_least_32_bytes",
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+        FREELLM_API_KEY: "real_prod_freellm_key",
+        FREELLM_FALLBACK_BASE_URL: "https://backup-31415.euw.devtunnels.ms/v1",
+        ADMIN_BOOTSTRAP_EMAIL: "admin@arsllm.ngtech.kz",
+        ADMIN_BOOTSTRAP_PASSWORD: "StrongProdAdminPassword_2026!",
+      }),
+    /FREELLM_FALLBACK_BASE_URL in production cannot use a VS Code Dev Tunnel/
+  );
+
+  // 3. Base URL normalization handles /v1, /v1beta/openai, and full /chat/completions URLs
+  assert.equal(
+    normalizeFreeLlmBaseUrl("https://api.company.kz"),
+    "https://api.company.kz/v1"
+  );
+  assert.equal(
+    normalizeFreeLlmBaseUrl("https://api.company.kz/v1/chat/completions/"),
+    "https://api.company.kz/v1"
+  );
+  assert.equal(
+    normalizeFreeLlmBaseUrl("https://generativelanguage.googleapis.com/v1beta/openai"),
+    "https://generativelanguage.googleapis.com/v1beta/openai"
+  );
+
+  // 4. X-Tunnel-Skip-AntiPhishing-Page header is ONLY added for *.devtunnels.ms
+  const prodHeaders = buildFreeLlmHeaders(
+    "sk-prod-key",
+    true,
+    "https://freellm-gateway.company.kz/v1",
+    true
+  );
+  assert.equal(prodHeaders.Authorization, "Bearer sk-prod-key");
+  assert.equal(prodHeaders["Content-Type"], "application/json");
+  assert.equal(prodHeaders.Accept, "text/event-stream, application/json");
+  assert.equal(prodHeaders["X-Tunnel-Skip-AntiPhishing-Page"], undefined);
+
+  const tunnelHeaders = buildFreeLlmHeaders(
+    "sk-dev-key",
+    true,
+    "https://v7skvft7-31415.euw.devtunnels.ms/v1",
+    false
+  );
+  assert.equal(tunnelHeaders["X-Tunnel-Skip-AntiPhishing-Page"], "true");
+
+  // 5. verifyFreeLlmConnection fails fast cleanly when FREELLM_API_BASE_URL is empty (no hidden fallback)
+  let fetchCalled = false;
+  const emptyReport = await verifyFreeLlmConnection(
+    { FREELLM_API_BASE_URL: "", FREELLM_API_KEY: "sk-key", FREELLM_MODEL: "auto" },
+    async () => {
+      fetchCalled = true;
+      return new Response("", { status: 200 });
+    }
+  );
+  assert.equal(fetchCalled, false);
+  assert.equal(emptyReport.modelsCheck.ok, false);
+  assert.match(emptyReport.modelsCheck.error ?? "", /not configured/);
+
+  // 6. streamChatWithFreeLlm supports CRLF/single-LF SSE, reasoning_content fallback, and JSON fallback when stream=true
+  const sseSingleLf =
+    'data: {"choices":[{"delta":{"reasoning_content":"Черновик рассуждения"}}]}\r\n' +
+    'data: {"choices":[{"delta":{"content":"Готово!"}}]}\n' +
+    "data: [DONE]\n";
+  const tokensSingleLf: string[] = [];
+  for await (const t of streamChatWithFreeLlm(
+    [{ role: "user", content: "Тест" }],
+    undefined,
+    {
+      FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+      FREELLM_API_KEY: "sk-prod-key",
+      FREELLM_MODEL: "auto",
+    },
+    async () =>
+      new Response(sseSingleLf, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      })
+  )) {
+    tokensSingleLf.push(t);
+  }
+  assert.equal(tokensSingleLf.join(""), "Готово!");
+
+  const jsonFallbackTokens: string[] = [];
+  for await (const t of streamChatWithFreeLlm(
+    [{ role: "user", content: "Тест JSON fallback" }],
+    undefined,
+    {
+      FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+      FREELLM_API_KEY: "sk-prod-key",
+      FREELLM_MODEL: "auto",
+    },
+    async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { role: "assistant", reasoning_content: "JSON ответ" } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+  )) {
+    jsonFallbackTokens.push(t);
+  }
+  assert.equal(jsonFallbackTokens.join(""), "JSON ответ");
+});
+
+test("True token-by-token SSE streaming: zero 260-char buffering in chat.ts, immediate short chunk yield, abort & error handling, unary fallback", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const { streamChatWithFreeLlm, chatWithFreeLlm } = await import("./freeLlm.js");
+
+  // 1. Verify backend/src/routes/chat.ts has no 260-char inspectionBuffer and uses flushSseResponse + X-Accel-Buffering: no
+  const chatRouteSrc = readFileSync(
+    resolve(process.cwd(), "backend/src/routes/chat.ts"),
+    "utf-8"
+  );
+  assert.ok(
+    !chatRouteSrc.includes("inspectionBuffer"),
+    "chat.ts must forward tokens immediately without 260-char inspectionBuffer"
+  );
+  assert.ok(
+    chatRouteSrc.includes('res.setHeader("X-Accel-Buffering", "no")'),
+    "chat.ts must set X-Accel-Buffering: no for SSE streams"
+  );
+  assert.ok(
+    chatRouteSrc.includes("flushSseResponse(res)"),
+    "chat.ts must flush response after writing SSE chunks"
+  );
+  assert.ok(
+    chatRouteSrc.includes("ttft_ms") && chatRouteSrc.includes("chunk_count"),
+    "chat.ts must record safe numeric streaming metrics"
+  );
+
+  // 2. streamChatWithFreeLlm yields a 2-char token immediately before later chunks arrive
+  const encoder = new TextEncoder();
+  const yielded: string[] = [];
+  let secondChunkSent = false;
+
+  const incrementalFetch: typeof fetch = async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":"Да"}}]}\n\n')
+        );
+        await new Promise((r) => setTimeout(r, 20));
+        secondChunkSent = true;
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":", готово"}}]}\n\ndata: [DONE]')
+        );
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  };
+
+  for await (const tok of streamChatWithFreeLlm(
+    [{ role: "user", content: "Быстрый тест" }],
+    undefined,
+    {
+      FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+      FREELLM_API_KEY: "sk-prod-key",
+      FREELLM_MODEL: "auto",
+    },
+    incrementalFetch
+  )) {
+    yielded.push(tok);
+    if (yielded.length === 1) {
+      assert.equal(tok, "Да");
+      assert.equal(
+        secondChunkSent,
+        false,
+        "First short token must be yielded immediately before later chunks arrive"
+      );
+    }
+  }
+  assert.equal(yielded.join(""), "Да, готово");
+
+  // 3. Mid-stream error in SSE JSON payload throws cleanly
+  await assert.rejects(async () => {
+    for await (const _t of streamChatWithFreeLlm(
+      [{ role: "user", content: "Ошибка в потоке" }],
+      undefined,
+      {
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+        FREELLM_API_KEY: "sk-prod-key",
+        FREELLM_MODEL: "auto",
+      },
+      async () =>
+        new Response(
+          'data: {"choices":[{"delta":{"content":"Часть "}}]}\n\n' +
+            'data: {"error":{"message":"Upstream stream interrupted"}}\n\n',
+          { status: 200, headers: { "Content-Type": "text/event-stream" } }
+        )
+    )) {
+      // consume
+    }
+  }, /Upstream stream interrupted/);
+
+  // 4. Client AbortSignal cancels stream cleanly
+  const abortController = new AbortController();
+  const partialOnAbort: string[] = [];
+  await assert.rejects(async () => {
+    for await (const t of streamChatWithFreeLlm(
+      [{ role: "user", content: "Отмена потока" }],
+      abortController.signal,
+      {
+        FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+        FREELLM_API_KEY: "sk-prod-key",
+        FREELLM_MODEL: "auto",
+      },
+      async () =>
+        new Response(
+          'data: {"choices":[{"delta":{"content":"Первый"}}]}\n\n' +
+            'data: {"choices":[{"delta":{"content":"Второй"}}]}\n\n',
+          { status: 200, headers: { "Content-Type": "text/event-stream" } }
+        )
+    )) {
+      partialOnAbort.push(t);
+      abortController.abort();
+    }
+  }, /Request aborted/);
+  assert.deepEqual(partialOnAbort, ["Первый"]);
+
+  // 5. Non-streaming mode (chatWithFreeLlm) continues to work cleanly
+  const unaryReply = await chatWithFreeLlm(
+    [{ role: "user", content: "Обычный запрос" }],
+    {
+      FREELLM_API_BASE_URL: "https://freellm-gateway.company.kz/v1",
+      FREELLM_API_KEY: "sk-prod-key",
+      FREELLM_MODEL: "auto",
+    },
+    async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "Непотоковый ответ" } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      )
+  );
+  assert.equal(unaryReply, "Непотоковый ответ");
+});
+
+
 
 
 

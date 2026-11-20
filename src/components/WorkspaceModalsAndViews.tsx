@@ -34,6 +34,7 @@ import {
   AdminUserRecord,
   AdminUsageResponse,
   QuotaLimits,
+  StreamMetrics,
   UserProfile,
 } from '../services/api';
 
@@ -56,6 +57,7 @@ interface SecondaryViewProps {
     targetUserId: number,
     updatedQuotas: QuotaLimits
   ) => void;
+  streamDiagnostics?: StreamMetrics[];
 }
 
 const DEMO_ADMIN_USAGE: AdminUsageResponse = {
@@ -94,6 +96,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   quotas = null,
   persistedAdminUsers = DEFAULT_ADMIN_USERS,
   onUpdateAdminUsers,
+  streamDiagnostics = [],
 }) => {
   const isAdmin = canConfigureQuotas(user);
   const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>(persistedAdminUsers);
@@ -498,6 +501,123 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
             </tbody>
           </table>
         </div>
+
+        {/* Protected Admin Streaming Diagnostics (numeric metrics only: no prompts, replies, or keys) */}
+        {(() => {
+          const backendStreamEvents = (adminUsage?.events ?? [])
+            .filter(
+              (ev) =>
+                ev.event_type === 'model_call' &&
+                ev.metadata &&
+                (typeof ev.metadata.ttft_ms === 'number' ||
+                  typeof ev.metadata.total_ms === 'number')
+            )
+            .slice(0, 10);
+
+          if (streamDiagnostics.length === 0 && backendStreamEvents.length === 0) {
+            return null;
+          }
+
+          return (
+            <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
+              <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-[14px] font-bold text-slate-900 dark:text-slate-100">
+                    Диагностика потоковой генерации (TTFT / SSE)
+                  </h3>
+                  <p className="text-[12px] text-slate-500 dark:text-slate-400">
+                    Технические замеры времени отклика без сохранения текста сообщений и ключей доступа.
+                  </p>
+                </div>
+              </div>
+
+              {streamDiagnostics.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
+                        <th className="py-2.5 px-4">Время (UTC)</th>
+                        <th className="py-2.5 px-4">Режим</th>
+                        <th className="py-2.5 px-4 text-right">TTFT</th>
+                        <th className="py-2.5 px-4 text-right">Всего</th>
+                        <th className="py-2.5 px-4 text-right">Чанков SSE</th>
+                        <th className="py-2.5 px-4 text-right">Символов</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13px] tabular-nums">
+                      {streamDiagnostics.slice(0, 10).map((m, idx) => (
+                        <tr key={`${m.sentAtIso}-${idx}`}>
+                          <td className="py-2.5 px-4 font-mono text-[12px] text-slate-600 dark:text-slate-300">
+                            {m.sentAtIso.replace('T', ' ').slice(0, 19)}
+                          </td>
+                          <td className="py-2.5 px-4 font-mono text-[12px] text-slate-700 dark:text-slate-200">
+                            {m.mode}
+                          </td>
+                          <td className="py-2.5 px-4 text-right text-slate-900 dark:text-slate-100 font-semibold">
+                            {m.ttftMs !== null ? `${m.ttftMs} мс` : '—'}
+                          </td>
+                          <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-300">
+                            {m.totalMs} мс
+                          </td>
+                          <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-300">
+                            {m.chunkCount}
+                          </td>
+                          <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-300">
+                            {m.charCount}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {streamDiagnostics.length === 0 && backendStreamEvents.length > 0 && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
+                        <th className="py-2.5 px-4">Время (UTC)</th>
+                        <th className="py-2.5 px-4">Режим</th>
+                        <th className="py-2.5 px-4 text-right">TTFT</th>
+                        <th className="py-2.5 px-4 text-right">Всего</th>
+                        <th className="py-2.5 px-4 text-right">Чанков</th>
+                        <th className="py-2.5 px-4 text-right">Символов</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13px] tabular-nums">
+                      {backendStreamEvents.map((ev) => {
+                        const meta = ev.metadata ?? {};
+                        return (
+                          <tr key={ev.id}>
+                            <td className="py-2.5 px-4 font-mono text-[12px] text-slate-600 dark:text-slate-300">
+                              {ev.created_at.replace('T', ' ').slice(0, 19)}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono text-[12px] text-slate-700 dark:text-slate-200">
+                              {typeof meta.mode === 'string' ? meta.mode : 'stream'}
+                            </td>
+                            <td className="py-2.5 px-4 text-right text-slate-900 dark:text-slate-100 font-semibold">
+                              {typeof meta.ttft_ms === 'number' ? `${meta.ttft_ms} мс` : '—'}
+                            </td>
+                            <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-300">
+                              {typeof meta.total_ms === 'number' ? `${meta.total_ms} мс` : '—'}
+                            </td>
+                            <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-300">
+                              {typeof meta.chunk_count === 'number' ? meta.chunk_count : '—'}
+                            </td>
+                            <td className="py-2.5 px-4 text-right text-slate-700 dark:text-slate-300">
+                              {typeof meta.reply_length === 'number' ? meta.reply_length : '—'}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </section>
     );
   }

@@ -47,7 +47,9 @@ interface FreeLlmResponse {
   choices?: Array<{
     message?: {
       role?: string;
-      content?: string;
+      content?: string | null;
+      reasoning_content?: string | null;
+      reasoning?: string | null;
     };
     finish_reason?: string | null;
   }>;
@@ -72,19 +74,34 @@ const PLACEHOLDER_API_KEYS = new Set([
   "secret",
 ]);
 
+export function isDevTunnelUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+  try {
+    const host = new URL(trimmed).hostname.toLowerCase();
+    return host === "devtunnels.ms" || host.endsWith(".devtunnels.ms");
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Builds standard headers for OpenAI-compatible FreeLLMAPI requests,
- * including the VS Code Dev Tunnel anti-phishing bypass header for API clients.
+ * Builds standard headers for OpenAI-compatible FreeLLMAPI requests.
+ * Adds `X-Tunnel-Skip-AntiPhishing-Page` ONLY when targeting `*.devtunnels.ms`.
  * Never logs or exposes the API key.
  */
 export function buildFreeLlmHeaders(
   apiKey: string,
-  includeJsonContentType = false
+  includeJsonContentType = false,
+  baseUrl = "",
+  acceptSse = false
 ): Record<string, string> {
   const headers: Record<string, string> = {
-    Accept: "application/json",
-    "X-Tunnel-Skip-AntiPhishing-Page": "true",
+    Accept: acceptSse ? "text/event-stream, application/json" : "application/json",
   };
+  if (isDevTunnelUrl(baseUrl)) {
+    headers["X-Tunnel-Skip-AntiPhishing-Page"] = "true";
+  }
   if (includeJsonContentType) {
     headers["Content-Type"] = "application/json";
   }
@@ -97,12 +114,40 @@ export function buildFreeLlmHeaders(
 
 /**
  * Normalizes a FreeLLMAPI / OpenAI-compatible base URL:
- * strips trailing slashes and appends `/v1` if no `/v1` suffix is present.
+ * strips trailing slashes and `/chat/completions` if provided, and appends `/v1`
+ * when no API version/OpenAI path suffix is present.
  */
 export function normalizeFreeLlmBaseUrl(rawUrl: string): string {
-  const trimmed = rawUrl.trim().replace(/\/+$/, "");
+  let trimmed = rawUrl.trim().replace(/\/+$/, "");
   if (!trimmed) return "";
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+  if (trimmed.endsWith("/chat/completions")) {
+    trimmed = trimmed.slice(0, -"/chat/completions".length).replace(/\/+$/, "");
+  }
+  if (/\/(?:v\d+(?:beta\d*)?(?:\/openai)?|openai)$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed}/v1`;
+}
+
+function extractMessageText(message?: {
+  content?: unknown;
+  reasoning_content?: unknown;
+  reasoning?: unknown;
+}): string {
+  if (!message) return "";
+  if (typeof message.content === "string" && message.content.trim()) {
+    return message.content;
+  }
+  if (
+    typeof message.reasoning_content === "string" &&
+    message.reasoning_content.trim()
+  ) {
+    return message.reasoning_content;
+  }
+  if (typeof message.reasoning === "string" && message.reasoning.trim()) {
+    return message.reasoning;
+  }
+  return "";
 }
 
 /**
@@ -223,7 +268,7 @@ export async function chatWithFreeLlm(
     try {
       const response = await fetchFn(`${ep.baseUrl}/chat/completions`, {
         method: "POST",
-        headers: buildFreeLlmHeaders(ep.apiKey, true),
+        headers: buildFreeLlmHeaders(ep.apiKey, true, ep.baseUrl, false),
         body: JSON.stringify({
           model: ep.model,
           messages,
@@ -234,17 +279,33 @@ export async function chatWithFreeLlm(
           : AbortSignal.timeout(ep.timeoutMs),
       });
 
+      const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+      if (contentType.includes("text/html")) {
+        const classifiedHtml = classifyNonOkResponse(response);
+        const htmlErr = new Error(classifiedHtml.message);
+        if (hasFallback) {
+          lastError = htmlErr;
+          continue;
+        }
+        throw htmlErr;
+      }
+
       const data = (await response.json().catch(() => null)) as
         | FreeLlmResponse
         | null;
 
       if (!response.ok) {
         const classified = classifyNonOkResponse(response);
+        const providerErrMsg = data?.error?.message?.trim();
         console.error(
           `FreeLLMAPI (${ep.name}) request failed with HTTP ${response.status}`
         );
 
-        const err = new Error(classified.message);
+        const err = new Error(
+          providerErrMsg
+            ? `${classified.message}: ${providerErrMsg.slice(0, 200)}`
+            : classified.message
+        );
 
         if (hasFallback && isRetryableStatus(response.status)) {
           lastError = err;
@@ -253,9 +314,9 @@ export async function chatWithFreeLlm(
         throw err;
       }
 
-      const content = data?.choices?.[0]?.message?.content;
+      const content = extractMessageText(data?.choices?.[0]?.message);
 
-      if (typeof content !== "string" || !content.trim()) {
+      if (!content.trim()) {
         const emptyErr = new Error("FreeLLMAPI returned an empty response");
         if (hasFallback) {
           lastError = emptyErr;
@@ -309,7 +370,7 @@ export async function* streamChatWithFreeLlm(
     try {
       const candidateResponse = await fetchFn(`${ep.baseUrl}/chat/completions`, {
         method: "POST",
-        headers: buildFreeLlmHeaders(ep.apiKey, true),
+        headers: buildFreeLlmHeaders(ep.apiKey, true, ep.baseUrl, true),
         body: JSON.stringify({
           model: ep.model,
           messages,
@@ -320,19 +381,60 @@ export async function* streamChatWithFreeLlm(
           : AbortSignal.timeout(ep.timeoutMs),
       });
 
+      const contentType = (
+        candidateResponse.headers.get("content-type") ?? ""
+      ).toLowerCase();
+
+      if (contentType.includes("text/html")) {
+        const classifiedHtml = classifyNonOkResponse(candidateResponse);
+        const htmlErr = new Error(classifiedHtml.message);
+        if (hasFallback) {
+          lastError = htmlErr;
+          continue;
+        }
+        throw htmlErr;
+      }
+
       if (!candidateResponse.ok) {
         const classified = classifyNonOkResponse(candidateResponse);
+        const errBody = (await candidateResponse.json().catch(() => null)) as
+          | FreeLlmResponse
+          | null;
+        const providerErrMsg = errBody?.error?.message?.trim();
         console.error(
           `FreeLLMAPI (${ep.name}) streaming request failed with HTTP ${candidateResponse.status}`
         );
 
-        const err = new Error(classified.message);
+        const err = new Error(
+          providerErrMsg
+            ? `${classified.message}: ${providerErrMsg.slice(0, 200)}`
+            : classified.message
+        );
 
         if (hasFallback && isRetryableStatus(candidateResponse.status)) {
           lastError = err;
           continue;
         }
         throw err;
+      }
+
+      if (contentType.includes("application/json")) {
+        const jsonBody = (await candidateResponse.json().catch(() => null)) as
+          | FreeLlmResponse
+          | null;
+        const fullText = extractMessageText(jsonBody?.choices?.[0]?.message);
+        if (fullText.trim()) {
+          yield fullText;
+          return;
+        }
+        const emptyJsonErr = new Error(
+          jsonBody?.error?.message || "FreeLLMAPI returned an empty JSON response"
+        );
+        if (hasFallback) {
+          lastError = emptyJsonErr;
+          continue;
+        }
+        throw emptyJsonErr;
       }
 
       if (!candidateResponse.body) {
@@ -368,6 +470,68 @@ export async function* streamChatWithFreeLlm(
   const decoder = new TextDecoder();
   let buffer = "";
   let streamFinished = false;
+  let yieldedContentCount = 0;
+  let reasoningFallbackBuffer = "";
+
+  const processSseLine = (rawLine: string): { done?: boolean; token?: string } => {
+    const line = rawLine.trim();
+    if (!line || !line.startsWith("data:")) return {};
+
+    const data = line.slice(5).trim();
+    if (!data) return {};
+
+    if (data === "[DONE]") {
+      return { done: true };
+    }
+
+    let parsed: {
+      choices?: Array<{
+        delta?: {
+          content?: unknown;
+          reasoning_content?: unknown;
+          reasoning?: unknown;
+        };
+        message?: {
+          content?: unknown;
+          reasoning_content?: unknown;
+          reasoning?: unknown;
+        };
+      }>;
+      error?: { message?: string };
+    };
+
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return {};
+    }
+
+    if (parsed.error) {
+      throw new Error(parsed.error.message || "FreeLLMAPI streaming error");
+    }
+
+    const choice = parsed.choices?.[0];
+    const deltaContent = choice?.delta?.content;
+    if (typeof deltaContent === "string" && deltaContent.length > 0) {
+      return { token: deltaContent };
+    }
+
+    const messageContent = choice?.message?.content;
+    if (typeof messageContent === "string" && messageContent.length > 0) {
+      return { token: messageContent };
+    }
+
+    const reasoningToken =
+      choice?.delta?.reasoning_content ??
+      choice?.delta?.reasoning ??
+      choice?.message?.reasoning_content ??
+      choice?.message?.reasoning;
+    if (typeof reasoningToken === "string" && reasoningToken.length > 0) {
+      reasoningFallbackBuffer += reasoningToken;
+    }
+
+    return {};
+  };
 
   try {
     while (true) {
@@ -381,75 +545,51 @@ export async function* streamChatWithFreeLlm(
 
       if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      buffer = buffer.replace(/\r\n/g, "\n");
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
 
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
 
-      for (const event of events) {
-        for (const line of event.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-
-          const data = line.slice(5).trim();
-
-          if (!data) continue;
-
-          if (data === "[DONE]") {
-            streamFinished = true;
-            return;
+      for (const rawLine of lines) {
+        if (signal?.aborted) {
+          throw new Error("Request aborted");
+        }
+        const resLine = processSseLine(rawLine);
+        if (resLine.done) {
+          streamFinished = true;
+          if (yieldedContentCount === 0 && reasoningFallbackBuffer.trim().length > 0) {
+            yieldedContentCount++;
+            yield reasoningFallbackBuffer.trim();
           }
-
-          let parsed: {
-            choices?: Array<{
-              delta?: { content?: unknown };
-            }>;
-            error?: { message?: string };
-          };
-
-          try {
-            parsed = JSON.parse(data);
-          } catch {
-            continue;
-          }
-
-          if (parsed.error) {
-            throw new Error(
-              parsed.error.message || "FreeLLMAPI streaming error"
-            );
-          }
-
-          const content = parsed.choices?.[0]?.delta?.content;
-
-          if (typeof content === "string" && content.length > 0) {
-            yield content;
-          }
+          return;
+        }
+        if (resLine.token) {
+          yieldedContentCount++;
+          yield resLine.token;
         }
       }
     }
 
-    // Process a final event if the server closed without a trailing separator.
-    buffer += decoder.decode();
+    // Process a final line if the server closed without a trailing newline.
+    buffer += decoder.decode().replace(/\r\n/g, "\n");
 
     if (!streamFinished && buffer.trim()) {
-      for (const line of buffer.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-
-        const data = line.slice(5).trim();
-
-        if (!data || data === "[DONE]") continue;
-
-        try {
-          const parsed = JSON.parse(data);
-          const content = parsed.choices?.[0]?.delta?.content;
-
-          if (typeof content === "string" && content.length > 0) {
-            yield content;
-          }
-        } catch {
-          // Ignore an incomplete final event.
+      for (const rawLine of buffer.split("\n")) {
+        if (signal?.aborted) {
+          throw new Error("Request aborted");
+        }
+        const resLine = processSseLine(rawLine);
+        if (resLine.done) break;
+        if (resLine.token) {
+          yieldedContentCount++;
+          yield resLine.token;
         }
       }
+    }
+
+    if (yieldedContentCount === 0 && reasoningFallbackBuffer.trim().length > 0) {
+      yieldedContentCount++;
+      yield reasoningFallbackBuffer.trim();
     }
   } finally {
     reader.releaseLock();
@@ -466,9 +606,7 @@ export async function verifyFreeLlmConnection(
   fetchFn: typeof fetch = fetch
 ): Promise<FreeLlmVerificationReport> {
   const baseUrl = normalizeFreeLlmBaseUrl(
-    customConfig?.FREELLM_API_BASE_URL ??
-      env.FREELLM_API_BASE_URL ??
-      "https://v7skvft7-31415.euw.devtunnels.ms/v1"
+    customConfig?.FREELLM_API_BASE_URL ?? env.FREELLM_API_BASE_URL ?? ""
   );
 
   const model =
@@ -484,13 +622,29 @@ export async function verifyFreeLlmConnection(
   const apiKeyConfigured = !PLACEHOLDER_API_KEYS.has(rawKey);
   const timeoutMs = customConfig?.FREELLM_TIMEOUT_MS ?? env.FREELLM_TIMEOUT_MS ?? 30_000;
 
+  if (!baseUrl) {
+    const missingUrlErr: FreeLlmEndpointCheck = {
+      ok: false,
+      status: null,
+      latencyMs: 0,
+      error: "FREELLM_API_BASE_URL is not configured",
+    };
+    return {
+      baseUrl: "",
+      model,
+      apiKeyConfigured,
+      modelsCheck: missingUrlErr,
+      completionCheck: missingUrlErr,
+    };
+  }
+
   // 1. Check GET /models
   let modelsCheck: FreeLlmEndpointCheck;
   const modelsStart = Date.now();
   try {
     const modelsRes = await fetchFn(`${baseUrl}/models`, {
       method: "GET",
-      headers: buildFreeLlmHeaders(rawKey, false),
+      headers: buildFreeLlmHeaders(rawKey, false, baseUrl, false),
       redirect: "manual",
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -549,7 +703,7 @@ export async function verifyFreeLlmConnection(
   try {
     const compRes = await fetchFn(`${baseUrl}/chat/completions`, {
       method: "POST",
-      headers: buildFreeLlmHeaders(rawKey, true),
+      headers: buildFreeLlmHeaders(rawKey, true, baseUrl, false),
       redirect: "manual",
       body: JSON.stringify({
         model,
@@ -585,8 +739,8 @@ export async function verifyFreeLlmConnection(
       };
     } else {
       const parsed = (await compRes.json().catch(() => null)) as FreeLlmResponse | null;
-      const content = parsed?.choices?.[0]?.message?.content ?? "";
-      if (typeof content === "string" && content.trim().length > 0) {
+      const content = extractMessageText(parsed?.choices?.[0]?.message);
+      if (content.trim().length > 0) {
         completionCheck = {
           ok: true,
           status: compRes.status,

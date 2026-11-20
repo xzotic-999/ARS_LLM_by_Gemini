@@ -10,12 +10,10 @@ import {
   AlertCircle,
   Square,
 } from 'lucide-react';
-import {
-  AttachedFileItem,
-  extractAttachmentText,
-  MAX_ATTACHMENTS_PER_MESSAGE,
-} from '../utils/fileExtractor';
+import type { AttachedFileItem } from '../utils/fileExtractor';
 import type { QuotaBlockStatus } from '../utils/dashboardLogic';
+
+const MAX_ATTACHMENTS_PER_MESSAGE = 5;
 
 interface ChatComposerProps {
   promptValue: string;
@@ -28,6 +26,7 @@ interface ChatComposerProps {
   onOpenPromptLibrary: () => void;
   onOpenModelParams: () => void;
   compact?: boolean;
+  popoverPlacement?: 'top' | 'bottom';
   disabled?: boolean;
   quotaBlockStatus?: QuotaBlockStatus | null;
   onOpenQuotasView?: () => void;
@@ -35,13 +34,14 @@ interface ChatComposerProps {
   onAbortStream?: () => void;
 }
 
-export const ChatComposer: React.FC<ChatComposerProps> = ({
+export const ChatComposer = React.memo<ChatComposerProps>(({
   promptValue,
   onPromptChange,
   onSubmitPrompt,
   onOpenPromptLibrary,
   onOpenModelParams,
   compact = false,
+  popoverPlacement = 'bottom',
   disabled = false,
   quotaBlockStatus = null,
   onOpenQuotasView,
@@ -139,6 +139,7 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       return;
     }
 
+    const { extractAttachmentText } = await import('../utils/fileExtractor');
     const extracted = await Promise.all(fileList.map((f) => extractAttachmentText(f)));
     const validItems: AttachedFileItem[] = [];
     const errors: string[] = [];
@@ -308,8 +309,8 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
             <div
               role="menu"
               aria-label="Вторичные действия чата"
-              className={`animate-fade-up absolute left-0 w-[264px] rounded-[14px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-[#151B2E] p-1.5 shadow-[0_12px_32px_rgba(15,23,42,0.12)] dark:shadow-[0_12px_32px_rgba(0,0,0,0.5)] z-30 ${
-                compact ? 'bottom-full mb-2.5' : 'top-full mt-2.5'
+              className={`animate-fade-up absolute left-0 w-[264px] max-h-[min(240px,calc(100dvh-24px))] overflow-y-auto rounded-[14px] border border-[#E2E5EE] dark:border-slate-700/90 bg-white dark:bg-[#151B2E] p-1.5 shadow-[0_12px_32px_rgba(15,23,42,0.12)] dark:shadow-[0_12px_32px_rgba(0,0,0,0.5)] z-30 ${
+                popoverPlacement === 'top' ? 'bottom-full mb-2.5' : 'top-full mt-2.5'
               }`}
             >
               <button
@@ -475,4 +476,4 @@ export const ChatComposer: React.FC<ChatComposerProps> = ({
       )}
     </section>
   );
-};
+});

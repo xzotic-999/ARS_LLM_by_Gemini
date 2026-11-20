@@ -137,41 +137,50 @@ const PER_CHUNK_IDLE_TIMEOUT_MS = 25_000;
 function loadRuntimeConfig(): FreeLlmRuntimeConfig {
   dotenv.config({ path: path.resolve(__dirname, '.env'), override: true });
 
+  const isProd = process.env.NODE_ENV === 'production';
   let fileFallback: Partial<FreeLlmRuntimeConfig> = {};
-  const fallbackCandidates = [
-    path.resolve(__dirname, '.aistudio/runtime-config.json'),
-    path.resolve(__dirname, 'backend/src/config/tunnelRuntime.json'),
-  ];
+  if (!isProd) {
+    const fallbackCandidates = [
+      path.resolve(__dirname, '.aistudio/runtime-config.json'),
+      path.resolve(__dirname, 'backend/src/config/tunnelRuntime.json'),
+    ];
 
-  for (const candidatePath of fallbackCandidates) {
-    try {
-      if (fs.existsSync(candidatePath)) {
-        const parsed = JSON.parse(fs.readFileSync(candidatePath, 'utf-8'));
-        if (parsed && typeof parsed === 'object' && parsed.FREELLM_API_KEY) {
-          fileFallback = parsed;
-          break;
+    for (const candidatePath of fallbackCandidates) {
+      try {
+        if (fs.existsSync(candidatePath)) {
+          const parsed = JSON.parse(fs.readFileSync(candidatePath, 'utf-8'));
+          if (parsed && typeof parsed === 'object' && parsed.FREELLM_API_KEY) {
+            fileFallback = parsed;
+            break;
+          }
         }
+      } catch {
+        // Ignore fallback file parse errors
       }
-    } catch {
-      // Ignore fallback file parse errors
     }
   }
 
+  const configuredBaseUrl =
+    process.env.FREELLM_API_BASE_URL?.trim() ||
+    (!isProd ? fileFallback.FREELLM_API_BASE_URL?.trim() || '' : '');
+
+  const resolvedBaseUrl =
+    isProd && configuredBaseUrl.toLowerCase().includes('.devtunnels.ms')
+      ? ''
+      : configuredBaseUrl;
+
   return {
-    FREELLM_API_BASE_URL:
-      process.env.FREELLM_API_BASE_URL?.trim() ||
-      fileFallback.FREELLM_API_BASE_URL?.trim() ||
-      'https://v7skvft7-31415.euw.devtunnels.ms/v1',
+    FREELLM_API_BASE_URL: resolvedBaseUrl,
     FREELLM_API_KEY:
       process.env.FREELLM_API_KEY?.trim() ||
-      fileFallback.FREELLM_API_KEY?.trim() ||
-      '',
+      (!isProd ? fileFallback.FREELLM_API_KEY?.trim() || '' : ''),
     FREELLM_MODEL:
       process.env.FREELLM_MODEL?.trim() ||
-      fileFallback.FREELLM_MODEL?.trim() ||
-      'auto',
+      (!isProd ? fileFallback.FREELLM_MODEL?.trim() || 'auto' : 'auto'),
     FREELLM_TIMEOUT_MS: Number(
-      process.env.FREELLM_TIMEOUT_MS ?? fileFallback.FREELLM_TIMEOUT_MS ?? 120_000
+      process.env.FREELLM_TIMEOUT_MS ??
+        (!isProd ? fileFallback.FREELLM_TIMEOUT_MS : undefined) ??
+        120_000
     ),
     FREELLM_FALLBACK_BASE_URL: process.env.FREELLM_FALLBACK_BASE_URL?.trim() || '',
     FREELLM_FALLBACK_API_KEY: process.env.FREELLM_FALLBACK_API_KEY?.trim() || '',
@@ -222,19 +231,24 @@ function buildTrustedMessages(
 }
 
 function normalizeV1BaseUrl(rawBaseUrl: string): string {
-  const trimmed = rawBaseUrl.trim().replace(/\/+$/, '');
-  if (!trimmed) return 'http://127.0.0.1:31415/v1';
-  if (trimmed.endsWith('/v1/chat/completions')) {
-    return trimmed.slice(0, -'/chat/completions'.length);
-  }
+  let trimmed = rawBaseUrl.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
   if (trimmed.endsWith('/chat/completions')) {
-    const withoutEndpoint = trimmed.slice(0, -'/chat/completions'.length);
-    return withoutEndpoint.endsWith('/v1') ? withoutEndpoint : `${withoutEndpoint}/v1`;
+    trimmed = trimmed.slice(0, -'/chat/completions'.length).replace(/\/+$/, '');
   }
-  if (trimmed.endsWith('/v1')) {
+  if (/\/(?:v\d+(?:beta\d*)?(?:\/openai)?|openai)$/i.test(trimmed)) {
     return trimmed;
   }
   return `${trimmed}/v1`;
+}
+
+function isDevTunnelHost(rawBaseUrl: string): boolean {
+  try {
+    const host = new URL(rawBaseUrl.trim()).hostname.toLowerCase();
+    return host === 'devtunnels.ms' || host.endsWith('.devtunnels.ms');
+  } catch {
+    return false;
+  }
 }
 
 function buildHeaders(apiKey: string, baseUrl: string): Record<string, string> {
@@ -245,7 +259,7 @@ function buildHeaders(apiKey: string, baseUrl: string): Record<string, string> {
   if (apiKey && apiKey.trim().length > 0) {
     headers['Authorization'] = `Bearer ${apiKey.trim()}`;
   }
-  if (baseUrl.includes('.devtunnels.ms')) {
+  if (isDevTunnelHost(baseUrl)) {
     headers['X-Tunnel-Skip-AntiPhishing-Page'] = 'true';
   }
   return headers;
@@ -294,6 +308,9 @@ async function singleUnaryCompletionAttempt(
 
   try {
     const normalizedBase = normalizeV1BaseUrl(baseUrl);
+    if (!normalizedBase) {
+      throw new Error('FREELLM_API_BASE_URL is not configured');
+    }
     const response = await fetch(`${normalizedBase}/chat/completions`, {
       method: 'POST',
       headers: buildHeaders(apiKey, normalizedBase),
@@ -436,6 +453,9 @@ async function* streamChatWithFreeLlm(
 
     try {
       const normalizedBase = normalizeV1BaseUrl(attempt.baseUrl);
+      if (!normalizedBase) {
+        throw new Error('FREELLM_API_BASE_URL is not configured');
+      }
       const response = await fetch(`${normalizedBase}/chat/completions`, {
         method: 'POST',
         headers: buildHeaders(attempt.apiKey, normalizedBase),
@@ -1430,9 +1450,12 @@ async function startServer() {
       }, 5_000);
 
       try {
-        let inspectionBuffer = '';
-        let bufferFlushed = false;
+        const streamSentAtMs = Date.now();
+        let firstTokenAtMs: number | null = null;
+        let chunkCount = 0;
         let emittedChars = 0;
+        let accumulatedOutput = '';
+        let restrictedTriggered = false;
 
         for await (const token of streamChatWithFreeLlm(
           trustedMessages,
@@ -1442,50 +1465,41 @@ async function startServer() {
           if (res.writableEnded || abortController.signal.aborted) {
             throw new Error('Request aborted');
           }
+          if (!token) continue;
 
-          if (!bufferFlushed) {
-            inspectionBuffer += token;
-            if (isSecurityRestrictedOutput(inspectionBuffer)) {
-              abortController.abort();
-              const refusalChunk = {
+          accumulatedOutput += token;
+          if (isSecurityRestrictedOutput(accumulatedOutput)) {
+            restrictedTriggered = true;
+            abortController.abort();
+            const refusalText =
+              emittedChars === 0
+                ? SECURITY_REFUSAL_MESSAGE
+                : `\n\n${SECURITY_REFUSAL_MESSAGE}`;
+            firstTokenAtMs ??= Date.now();
+            chunkCount += 1;
+            emittedChars += refusalText.length;
+            res.write(
+              `data: ${JSON.stringify({
                 id: completionId,
                 object: 'chat.completion.chunk',
                 created,
                 choices: [
                   {
                     index: 0,
-                    delta: { content: SECURITY_REFUSAL_MESSAGE },
+                    delta: { content: refusalText },
                     finish_reason: null,
                   },
                 ],
-              };
-              res.write(`data: ${JSON.stringify(refusalChunk)}\n\n`);
-              emittedChars += SECURITY_REFUSAL_MESSAGE.length;
-              bufferFlushed = true;
-              inspectionBuffer = '';
-              break;
-            }
-            if (inspectionBuffer.length >= 260) {
-              bufferFlushed = true;
-              emittedChars += inspectionBuffer.length;
-              const initialChunk = {
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created,
-                choices: [
-                  {
-                    index: 0,
-                    delta: { content: inspectionBuffer },
-                    finish_reason: null,
-                  },
-                ],
-              };
-              res.write(`data: ${JSON.stringify(initialChunk)}\n\n`);
-              inspectionBuffer = '';
-            }
-            continue;
+              })}\n\n`
+            );
+            (res as unknown as { flush?: () => void }).flush?.();
+            break;
           }
 
+          if (firstTokenAtMs === null) {
+            firstTokenAtMs = Date.now();
+          }
+          chunkCount += 1;
           emittedChars += token.length;
           const chunk = {
             id: completionId,
@@ -1500,34 +1514,27 @@ async function startServer() {
             ],
           };
           res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          (res as unknown as { flush?: () => void }).flush?.();
         }
 
-        if (abortController.signal.aborted) {
+        if (!restrictedTriggered && abortController.signal.aborted) {
           throw new Error('Request aborted');
-        }
-
-        if (!bufferFlushed && inspectionBuffer.length > 0 && !res.writableEnded) {
-          const safeOut = isSecurityRestrictedOutput(inspectionBuffer)
-            ? SECURITY_REFUSAL_MESSAGE
-            : inspectionBuffer;
-          emittedChars += safeOut.length;
-          const finalContentChunk = {
-            id: completionId,
-            object: 'chat.completion.chunk',
-            created,
-            choices: [
-              {
-                index: 0,
-                delta: { content: safeOut },
-                finish_reason: null,
-              },
-            ],
-          };
-          res.write(`data: ${JSON.stringify(finalContentChunk)}\n\n`);
         }
 
         if (emittedChars === 0) {
           throw new Error('Empty stream response');
+        }
+
+        const totalMs = Date.now() - streamSentAtMs;
+        const ttftMs =
+          firstTokenAtMs !== null ? firstTokenAtMs - streamSentAtMs : totalMs;
+        if (process.env.NODE_ENV !== 'production') {
+          console.info('[preview/chat/stream] metrics', {
+            ttftMs,
+            totalMs,
+            chunkCount,
+            replyLength: emittedChars,
+          });
         }
 
         commitPreviewReservation();
@@ -1547,6 +1554,7 @@ async function startServer() {
           };
           res.write(`data: ${JSON.stringify(doneChunk)}\n\n`);
           res.write('data: [DONE]\n\n');
+          (res as unknown as { flush?: () => void }).flush?.();
         }
       } catch (err) {
         releasePreviewReservation();
@@ -1558,6 +1566,7 @@ async function startServer() {
               error: { code: 'BAD_GATEWAY', message: errMsg },
             })}\n\n`
           );
+          (res as unknown as { flush?: () => void }).flush?.();
         }
       } finally {
         releasePreviewReservation();

@@ -152,6 +152,32 @@ export function isDeveloperLocalUrl(urlString: string): boolean {
   return isDeveloperLocalHost(parsed.hostname);
 }
 
+/**
+ * Returns true if the URL points to a VS Code Dev Tunnel (*.devtunnels.ms).
+ */
+export function isDevTunnelUrl(urlString: string): boolean {
+  const cleaned = stripSurroundingQuotes(urlString);
+  if (!cleaned) return false;
+  try {
+    const host = new URL(cleaned).hostname.toLowerCase();
+    return host === "devtunnels.ms" || host.endsWith(".devtunnels.ms");
+  } catch {
+    return false;
+  }
+}
+
+function normalizeConfiguredAiBaseUrl(rawValue: string): string {
+  let trimmed = rawValue.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  if (trimmed.endsWith("/chat/completions")) {
+    trimmed = trimmed.slice(0, -"/chat/completions".length).replace(/\/+$/, "");
+  }
+  if (/\/(?:v\d+(?:beta\d*)?(?:\/openai)?|openai)$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed}/v1`;
+}
+
 function parseBool(value: string | undefined, defaultValue: boolean): boolean {
   const cleaned = stripSurroundingQuotes(value);
   if (!cleaned) return defaultValue;
@@ -260,27 +286,27 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     );
   }
 
-  const DEFAULT_CLOUD_FREELLM_BASE_URL =
-    "https://v7skvft7-31415.euw.devtunnels.ms/v1";
-  const rawFreeLlmBaseUrl = stripSurroundingQuotes(rawEnv.FREELLM_API_BASE_URL).replace(/\/+$/, "");
-  const normalizedRawBaseUrl = rawFreeLlmBaseUrl
-    ? rawFreeLlmBaseUrl.endsWith("/v1")
-      ? rawFreeLlmBaseUrl
-      : `${rawFreeLlmBaseUrl}/v1`
-    : "";
-  const freeLlmBaseUrl = normalizedRawBaseUrl || DEFAULT_CLOUD_FREELLM_BASE_URL;
+  const rawFreeLlmBaseUrl = stripSurroundingQuotes(rawEnv.FREELLM_API_BASE_URL);
+  const freeLlmBaseUrl = normalizeConfiguredAiBaseUrl(rawFreeLlmBaseUrl);
 
-  if (!freeLlmBaseUrl) {
+  if (isProd && !freeLlmBaseUrl) {
     throw new Error(
       "FREELLM_API_BASE_URL is required in production and must point to a remotely hosted AI gateway or OpenAI-compatible API endpoint."
     );
   }
 
-  const isLocalFreeLlm = isDeveloperLocalUrl(freeLlmBaseUrl);
-  if (isProd && isLocalFreeLlm) {
-    throw new Error(
-      "FREELLM_API_BASE_URL in production cannot use localhost, 127.0.0.1, or host.docker.internal. Configure a remotely hosted FreeLLMAPI service or cloud OpenAI-compatible endpoint."
-    );
+  if (freeLlmBaseUrl) {
+    const isLocalFreeLlm = isDeveloperLocalUrl(freeLlmBaseUrl);
+    if (isProd && isLocalFreeLlm) {
+      throw new Error(
+        "FREELLM_API_BASE_URL in production cannot use localhost, 127.0.0.1, or host.docker.internal. Configure a remotely hosted FreeLLMAPI service or cloud OpenAI-compatible endpoint."
+      );
+    }
+    if (isProd && isDevTunnelUrl(freeLlmBaseUrl)) {
+      throw new Error(
+        "FREELLM_API_BASE_URL in production cannot use a VS Code Dev Tunnel (devtunnels.ms). Configure a server-hosted FreeLLMAPI service or cloud OpenAI-compatible endpoint."
+      );
+    }
   }
 
   const freellmApiKey = stripSurroundingQuotes(rawEnv.FREELLM_API_KEY);
@@ -290,12 +316,18 @@ export function validateEnvConfig(rawEnv: NodeJS.ProcessEnv): Env {
     );
   }
 
-  const fallbackBaseUrl = stripSurroundingQuotes(rawEnv.FREELLM_FALLBACK_BASE_URL);
+  const rawFallbackBaseUrl = stripSurroundingQuotes(rawEnv.FREELLM_FALLBACK_BASE_URL);
+  const fallbackBaseUrl = normalizeConfiguredAiBaseUrl(rawFallbackBaseUrl);
   if (fallbackBaseUrl) {
     const isLocalFallback = isDeveloperLocalUrl(fallbackBaseUrl);
     if (isProd && isLocalFallback) {
       throw new Error(
         "FREELLM_FALLBACK_BASE_URL in production cannot use localhost, 127.0.0.1, or host.docker.internal."
+      );
+    }
+    if (isProd && isDevTunnelUrl(fallbackBaseUrl)) {
+      throw new Error(
+        "FREELLM_FALLBACK_BASE_URL in production cannot use a VS Code Dev Tunnel (devtunnels.ms)."
       );
     }
   }

@@ -66,7 +66,7 @@ const BASE_NAV_ITEMS: { id: NavSectionId; label: string; adminOnly?: boolean }[]
 
 const LIST_COLOR_SWATCHES = ['#6366F1', '#3B82F6', '#10B981', '#F59E0B', '#EC4899'];
 
-export const Sidebar: React.FC<SidebarProps> = ({
+export const Sidebar = React.memo<SidebarProps>(({
   activeNav,
   onSelectNav,
   activeCategoryId,
@@ -791,4 +791,4 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
     </>
   );
-};
+});

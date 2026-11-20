@@ -924,6 +924,192 @@ test('deduplicateSessions eliminates duplicate keys (such as conv-101) and prese
   assert.equal(deduped[0].title, 'Диалог 101 (новый)');
 });
 
+test('chatApi.streamCompletions streams incremental tokens before [DONE], flushes EOF line, records safe StreamMetrics, handles errors/aborts/JSON fallback', async () => {
+  const { parseSseLines, chatApi } = await import('../services/api');
+
+  // 1. parseSseLines handles delta.content, message.content fallback, CRLF, and [DONE]
+  const parsedSse = parseSseLines(
+    'data: {"choices":[{"delta":{"content":"Привет"}}]}\r\n\r\n' +
+      'data: {"choices":[{"message":{"content":" мир"}}]}\r\n\r\n' +
+      'data: [DONE]\r\n\r\n'
+  );
+  assert.deepEqual(parsedSse.events, [
+    { type: 'delta', content: 'Привет' },
+    { type: 'delta', content: ' мир' },
+    { type: 'done' },
+  ]);
+  assert.equal(parsedSse.remainingBuffer, '');
+
+  const origFetch = globalThis.fetch;
+  try {
+    // 2. True incremental token delivery BEFORE [DONE] + EOF flush without trailing newline
+    const encoder = new TextEncoder();
+    const receivedTokens: string[] = [];
+    const metricsList: import('../services/api').StreamMetrics[] = [];
+    let doneCount = 0;
+
+    globalThis.fetch = (async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(
+            encoder.encode('data: {"choices":[{"delta":{"content":"Первый "}}]}\n\n')
+          );
+          await new Promise((r) => setTimeout(r, 15));
+          // Assert first token arrived cleanly before second chunk is even pushed
+          assert.deepEqual(receivedTokens, ['Первый ']);
+          // Final line intentionally omits trailing newline before stream closes
+          controller.enqueue(
+            encoder.encode('data: {"choices":[{"delta":{"content":"токен"}}]}')
+          );
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof fetch;
+
+    await chatApi.streamCompletions(
+      [{ role: 'user', content: 'Тест потоковой генерации' }],
+      (t) => receivedTokens.push(t),
+      () => {
+        doneCount += 1;
+      },
+      (err) => {
+        throw err;
+      },
+      undefined,
+      (m) => {
+        metricsList.push(m);
+      }
+    );
+
+    assert.equal(receivedTokens.join(''), 'Первый токен');
+    assert.equal(doneCount, 1);
+    assert.equal(metricsList.length, 1);
+    assert.equal(metricsList[0].mode, 'stream');
+    assert.equal(metricsList[0].chunkCount, 2);
+    assert.equal(metricsList[0].charCount, 'Первый токен'.length);
+    assert.ok(typeof metricsList[0].ttftMs === 'number');
+    assert.ok(metricsList[0].totalMs >= metricsList[0].ttftMs);
+
+    // 3. Mid-stream SSE error triggers onError
+    const capturedErrors: Error[] = [];
+    const errMetrics: import('../services/api').StreamMetrics[] = [];
+    globalThis.fetch = (async () => {
+      const sseErr =
+        'data: {"choices":[{"delta":{"content":"Начало "}}]}\n\n' +
+        'event: error\ndata: {"error":{"code":"PROVIDER_ERROR","message":"Шлюз перегружен"}}\n\n';
+      return new Response(sseErr, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof fetch;
+
+    const partialBeforeErr: string[] = [];
+    await chatApi.streamCompletions(
+      [{ role: 'user', content: 'Тест ошибки' }],
+      (t) => partialBeforeErr.push(t),
+      () => {
+        throw new Error('onDone should not fire on error');
+      },
+      (err) => {
+        capturedErrors.push(err);
+      },
+      undefined,
+      (m) => {
+        errMetrics.push(m);
+      }
+    );
+    assert.deepEqual(partialBeforeErr, ['Начало ']);
+    assert.equal(capturedErrors.length, 1);
+    assert.match(capturedErrors[0].message, /Шлюз перегружен/);
+    assert.equal(errMetrics[0]?.mode, 'error');
+
+    // 4. Client AbortSignal preserves partial output & calls onDone cleanly
+    const abortCtrl = new AbortController();
+    const abortedTokens: string[] = [];
+    let abortDone = false;
+    const abortMetrics: import('../services/api').StreamMetrics[] = [];
+
+    globalThis.fetch = (async (_input, init) => {
+      const sig = init?.signal;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(
+            encoder.encode('data: {"choices":[{"delta":{"content":"Часть"}}]}\n\n')
+          );
+          await new Promise((r) => setTimeout(r, 15));
+          if (sig?.aborted) {
+            controller.error(new DOMException('Aborted', 'AbortError'));
+            return;
+          }
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      });
+    }) as typeof fetch;
+
+    await chatApi.streamCompletions(
+      [{ role: 'user', content: 'Тест отмены' }],
+      (t) => {
+        abortedTokens.push(t);
+        abortCtrl.abort();
+      },
+      () => {
+        abortDone = true;
+      },
+      (err) => {
+        throw err;
+      },
+      abortCtrl.signal,
+      (m) => {
+        abortMetrics.push(m);
+      }
+    );
+    assert.deepEqual(abortedTokens, ['Часть']);
+    assert.equal(abortDone, true);
+    assert.equal(abortMetrics[0]?.mode, 'aborted');
+
+    // 5. JSON fallback compatibility (non-streaming provider response)
+    const jsonTokens: string[] = [];
+    let jsonDone = false;
+    const jsonMetrics: import('../services/api').StreamMetrics[] = [];
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { role: 'assistant', content: 'Обычный ответ JSON' } }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )) as typeof fetch;
+
+    await chatApi.streamCompletions(
+      [{ role: 'user', content: 'Тест JSON' }],
+      (t) => jsonTokens.push(t),
+      () => {
+        jsonDone = true;
+      },
+      (err) => {
+        throw err;
+      },
+      undefined,
+      (m) => {
+        jsonMetrics.push(m);
+      }
+    );
+    assert.deepEqual(jsonTokens, ['Обычный ответ JSON']);
+    assert.equal(jsonDone, true);
+    assert.equal(jsonMetrics[0]?.mode, 'json-fallback');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+
 
 
 

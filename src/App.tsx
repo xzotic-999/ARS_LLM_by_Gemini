@@ -3,20 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback, Suspense } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { ChatComposer } from './components/ChatComposer';
 import { QuickPrompts } from './components/QuickPrompts';
 import { ChatThreadView } from './components/ChatThreadView';
-import { LoginPage } from './components/LoginPage';
-import {
-  WorkspaceSectionView,
-  PromptLibraryModal,
-  ModelParamsModal,
-  CommandSearchModal,
-  ProfileModal,
-} from './components/WorkspaceModalsAndViews';
 import {
   ChatListCategory,
   ChatMessage,
@@ -55,14 +47,39 @@ import {
   conversationsApi,
   messagesApi,
   QuotaLimits,
+  StreamMetrics,
   UserProfile,
 } from './services/api';
-import {
-  AttachedFileItem,
-  buildPromptWithUntrustedAttachments,
-} from './utils/fileExtractor';
+import type { AttachedFileItem } from './utils/fileExtractor';
 
-const buildPromptWithAttachments = buildPromptWithUntrustedAttachments;
+const LoginPage = React.lazy(() =>
+  import('./components/LoginPage').then((m) => ({ default: m.LoginPage }))
+);
+const WorkspaceSectionView = React.lazy(() =>
+  import('./components/WorkspaceModalsAndViews').then((m) => ({
+    default: m.WorkspaceSectionView,
+  }))
+);
+const PromptLibraryModal = React.lazy(() =>
+  import('./components/WorkspaceModalsAndViews').then((m) => ({
+    default: m.PromptLibraryModal,
+  }))
+);
+const ModelParamsModal = React.lazy(() =>
+  import('./components/WorkspaceModalsAndViews').then((m) => ({
+    default: m.ModelParamsModal,
+  }))
+);
+const CommandSearchModal = React.lazy(() =>
+  import('./components/WorkspaceModalsAndViews').then((m) => ({
+    default: m.CommandSearchModal,
+  }))
+);
+const ProfileModal = React.lazy(() =>
+  import('./components/WorkspaceModalsAndViews').then((m) => ({
+    default: m.ProfileModal,
+  }))
+);
 
 const DEMO_EMPLOYEE_USER: UserProfile = {
   id: 2,
@@ -192,12 +209,21 @@ export default function App() {
 
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [streamDiagnostics, setStreamDiagnostics] = useState<StreamMetrics[]>([]);
   const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState<{
     text: string;
     attachments: string[];
     attachmentDetails?: AttachedFileItem[];
   } | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const hydratedConversationIdsRef = useRef<Set<number>>(new Set());
+
+  const recordStreamMetrics = useCallback((metrics: StreamMetrics) => {
+    setStreamDiagnostics((prev) => [metrics, ...prev].slice(0, 20));
+    if (import.meta.env.DEV) {
+      console.debug('[ars-llm/stream]', metrics);
+    }
+  }, []);
 
   // Sync dark mode class on root HTML element
   useEffect(() => {
@@ -217,9 +243,9 @@ export default function App() {
     [theme]
   );
 
-  // Persist workspace state (chats, active session, quotas, role, theme, personal instructions) so refresh never loses data
+  // Persist workspace state without serializing entire history on every streamed token
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || isStreaming) return;
     try {
       const payload = serializeWorkspaceState({
         theme,
@@ -241,6 +267,7 @@ export default function App() {
       // Ignore storage quota errors in restricted environments
     }
   }, [
+    isStreaming,
     theme,
     isDemoMode,
     demoRole,
@@ -300,6 +327,11 @@ export default function App() {
     if (isDemoMode) return;
     try {
       const list = await conversationsApi.list();
+      for (const conv of list) {
+        if (Array.isArray(conv.messages)) {
+          hydratedConversationIdsRef.current.add(conv.id);
+        }
+      }
       setSessions((prev) => {
         if (list.length === 0) {
           return deduplicateSessions(prev);
@@ -359,19 +391,22 @@ export default function App() {
     };
   }, [isDemoMode, loadConversations, refreshQuotas]);
 
-  const handleLogin = async (email: string, password: string) => {
+  const handleLogin = useCallback(async (email: string, password: string) => {
     const res = await authApi.login(email, password);
+    hydratedConversationIdsRef.current.clear();
     setIsDemoMode(false);
     setUser(res.user);
-    if (res.user.quotas) {
-      setBackendQuotas(res.user.quotas);
-    }
     setActiveSessionId(null);
     setActiveNav('chats');
-    await Promise.all([loadConversations(), refreshQuotas()]);
-  };
+    if (res.user.quotas) {
+      setBackendQuotas(res.user.quotas);
+      await loadConversations();
+    } else {
+      await Promise.all([loadConversations(), refreshQuotas()]);
+    }
+  }, [loadConversations, refreshQuotas]);
 
-  const handleSwitchDemoRole = (role: 'user' | 'admin') => {
+  const handleSwitchDemoRole = useCallback((role: 'user' | 'admin') => {
     setDemoRole(role);
     const baseUser = role === 'admin' ? DEMO_ADMIN_USER : DEMO_EMPLOYEE_USER;
     setUser(
@@ -382,9 +417,9 @@ export default function App() {
     } else if (role === 'admin' && activeNav === 'quotas') {
       setActiveNav('admin');
     }
-  };
+  }, [profileDisplayName, activeNav]);
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
       streamAbortRef.current = null;
@@ -396,14 +431,15 @@ export default function App() {
         // Ignore network errors on logout
       }
     }
+    hydratedConversationIdsRef.current.clear();
     setIsDemoMode(false);
     setUser(null);
     setBackendQuotas(null);
     setActiveSessionId(null);
     setStreamError(null);
-  };
+  }, [isDemoMode]);
 
-  const handleSelectSession = async (sessionId: string) => {
+  const handleSelectSession = useCallback(async (sessionId: string) => {
     setActiveSessionId(sessionId);
     setActiveNav('chats');
     setStreamError(null);
@@ -417,8 +453,14 @@ export default function App() {
 
     if (Number.isNaN(convId)) return;
 
+    // Skip duplicate Neon query when conversation messages were already hydrated via conversationsApi.list()
+    if (hydratedConversationIdsRef.current.has(convId) && target) {
+      return;
+    }
+
     try {
       const msgs = await messagesApi.list(convId);
+      hydratedConversationIdsRef.current.add(convId);
       setSessions((prev) =>
         prev.map((s) => {
           if (s.id !== sessionId) return s;
@@ -442,19 +484,19 @@ export default function App() {
         err instanceof Error ? err.message : 'Не удалось загрузить историю сообщений'
       );
     }
-  };
+  }, [isDemoMode, sessions]);
 
-  const handleRenameSession = async (sessionId: string, newTitle: string) => {
+  const handleRenameSession = useCallback(async (sessionId: string, newTitle: string) => {
     const trimmed = newTitle.trim();
     if (!trimmed) return;
 
+    const target = sessions.find((s) => s.id === sessionId);
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, title: trimmed } : s))
     );
 
     if (isDemoMode) return;
 
-    const target = sessions.find((s) => s.id === sessionId);
     if (target?.conversationId) {
       try {
         await conversationsApi.rename(target.conversationId, trimmed);
@@ -462,14 +504,15 @@ export default function App() {
         loadConversations();
       }
     }
-  };
+  }, [isDemoMode, sessions, loadConversations]);
 
-  const handleDeleteSession = async (sessionId: string) => {
+  const handleDeleteSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
-    if (activeSessionId === sessionId) {
-      setActiveSessionId(null);
+    if (target?.conversationId) {
+      hydratedConversationIdsRef.current.delete(target.conversationId);
     }
+    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setActiveSessionId((prev) => (prev === sessionId ? null : prev));
 
     if (isDemoMode) return;
 
@@ -480,7 +523,7 @@ export default function App() {
         loadConversations();
       }
     }
-  };
+  }, [isDemoMode, sessions, loadConversations]);
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? null,
@@ -504,16 +547,16 @@ export default function App() {
     [sessions, searchQuery, activeCategoryId]
   );
 
-  const handleCreateList = (name: string, colorHex: string) => {
+  const handleCreateList = useCallback((name: string, colorHex: string) => {
     const res = createCustomChatList(chatLists, name, colorHex);
     if (!res.ok) {
       return { ok: false, error: res.error };
     }
     setChatLists(res.lists);
     return { ok: true };
-  };
+  }, [chatLists]);
 
-  const handleNewChat = () => {
+  const handleNewChat = useCallback(() => {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
       streamAbortRef.current = null;
@@ -524,17 +567,17 @@ export default function App() {
     setActiveNav('chats');
     setPromptValue('');
     setStreamError(null);
-  };
+  }, []);
 
-  const handleAbortStream = () => {
+  const handleAbortStream = useCallback(() => {
     if (streamAbortRef.current) {
       streamAbortRef.current.abort();
       streamAbortRef.current = null;
     }
     setIsStreaming(false);
-  };
+  }, []);
 
-  const handleSubmitPrompt = async (
+  const handleSubmitPrompt = useCallback(async (
     text: string,
     attachments: string[],
     attachmentDetails?: AttachedFileItem[]
@@ -552,11 +595,16 @@ export default function App() {
 
     setStreamError(null);
     setLastSubmittedPrompt({ text: trimmed, attachments, attachmentDetails });
-    const promptWithAttachments = buildPromptWithAttachments(
-      trimmed,
-      attachments,
-      attachmentDetails
-    );
+
+    let promptWithAttachments = trimmed;
+    if (attachments.length > 0 || (attachmentDetails && attachmentDetails.length > 0)) {
+      const { buildPromptWithUntrustedAttachments } = await import('./utils/fileExtractor');
+      promptWithAttachments = buildPromptWithUntrustedAttachments(
+        trimmed,
+        attachments,
+        attachmentDetails
+      );
+    }
 
     // Demo / Preview workspace mode: stream real completion via server-side /api/v1/chat/completions
     if (isDemoMode) {
@@ -737,7 +785,8 @@ export default function App() {
             )
           );
         },
-        abortController.signal
+        abortController.signal,
+        recordStreamMetrics
       );
       return;
     }
@@ -751,6 +800,7 @@ export default function App() {
         const title = trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed;
         const createdConv = await conversationsApi.create(title);
         convId = createdConv.id;
+        hydratedConversationIdsRef.current.add(convId);
         currentSession = mapBackendConversationToSession(createdConv, []);
         currentSession.categoryId = activeCategoryId ?? 'code';
         setSessions((prev) => deduplicateSessions([currentSession!, ...prev]));
@@ -759,6 +809,7 @@ export default function App() {
 
       const targetSessionId = currentSession.id;
       const targetConvId = convId;
+      hydratedConversationIdsRef.current.add(targetConvId);
       setActiveNav('chats');
       setPromptValue('');
 
@@ -890,7 +941,8 @@ export default function App() {
           );
           refreshQuotas();
         },
-        abortController.signal
+        abortController.signal,
+        recordStreamMetrics
       );
     } catch (err) {
       setIsStreaming(false);
@@ -906,18 +958,28 @@ export default function App() {
       );
       refreshQuotas();
     }
-  };
+  }, [
+    isStreaming,
+    quotaBlockStatus,
+    isDemoMode,
+    activeSession,
+    activeCategoryId,
+    personalInstructions,
+    demoRole,
+    recordStreamMetrics,
+    refreshQuotas,
+  ]);
 
-  const handleRetryLastPrompt = () => {
+  const handleRetryLastPrompt = useCallback(() => {
     if (!lastSubmittedPrompt || isStreaming || quotaBlockStatus.isBlocked) return;
     handleSubmitPrompt(
       lastSubmittedPrompt.text,
       lastSubmittedPrompt.attachments,
       lastSubmittedPrompt.attachmentDetails
     );
-  };
+  }, [lastSubmittedPrompt, isStreaming, quotaBlockStatus.isBlocked, handleSubmitPrompt]);
 
-  const handleRegenerateResponse = (assistantMessageId: string) => {
+  const handleRegenerateResponse = useCallback((assistantMessageId: string) => {
     if (isStreaming || quotaBlockStatus.isBlocked || !activeSession) return;
     const msgIdx = activeSession.messages.findIndex((m) => m.id === assistantMessageId);
     if (msgIdx <= 0) {
@@ -942,9 +1004,9 @@ export default function App() {
       precedingUserMsg.content,
       precedingUserMsg.attachments ?? []
     );
-  };
+  }, [isStreaming, quotaBlockStatus.isBlocked, activeSession, lastSubmittedPrompt, handleRetryLastPrompt, handleSubmitPrompt]);
 
-  const handleEditUserPrompt = (userMessageId: string, newContent: string) => {
+  const handleEditUserPrompt = useCallback((userMessageId: string, newContent: string) => {
     if (isStreaming || quotaBlockStatus.isBlocked || !activeSession) return;
     const msgIdx = activeSession.messages.findIndex((m) => m.id === userMessageId);
     if (msgIdx === -1) return;
@@ -958,17 +1020,42 @@ export default function App() {
     );
 
     handleSubmitPrompt(newContent, existingMsg.attachments ?? []);
-  };
+  }, [isStreaming, quotaBlockStatus.isBlocked, activeSession, handleSubmitPrompt]);
 
-  const handleSelectQuickPrompt = (qp: QuickPrompt) => {
+  const handleSelectQuickPrompt = useCallback((qp: QuickPrompt) => {
     handleSubmitPrompt(qp.promptText, []);
-  };
+  }, [handleSubmitPrompt]);
 
-  const handleToggleStar = (sessionId: string) => {
+  const handleToggleStar = useCallback((sessionId: string) => {
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, starred: !s.starred } : s))
     );
-  };
+  }, []);
+
+  const handleSidebarSelectNav = useCallback((nav: NavSectionId) => {
+    setActiveNav(nav);
+    setActiveSessionId(null);
+  }, []);
+
+  const handleSidebarSelectCategory = useCallback((catId: string | null) => {
+    setActiveCategoryId(catId);
+    setActiveSessionId(null);
+  }, []);
+
+  const handleSidebarSearchChange = useCallback((q: string) => {
+    setSearchQuery(q);
+    if (q.trim()) {
+      setActiveSessionId((prev) => (prev ? null : prev));
+    }
+  }, []);
+
+  const handleOpenCommandSearch = useCallback(() => setCommandSearchOpen(true), []);
+  const handleToggleCollapse = useCallback(() => setSidebarCollapsed((prev) => !prev), []);
+  const handleOpenMobileMenu = useCallback(() => setMobileMenuOpen(true), []);
+  const handleCloseMobile = useCallback(() => setMobileMenuOpen(false), []);
+  const handleOpenProfile = useCallback(() => setProfileModalOpen(true), []);
+  const handleOpenPromptLibrary = useCallback(() => setPromptLibraryOpen(true), []);
+  const handleOpenModelParams = useCallback(() => setModelParamsOpen(true), []);
 
   const topBarTitle = useMemo(() => {
     if (activeSession) return activeSession.title;
@@ -1009,11 +1096,24 @@ export default function App() {
 
   if (!user && !isDemoMode) {
     return (
-      <LoginPage
-        theme={theme}
-        onSelectTheme={handleSelectTheme}
-        onLogin={handleLogin}
-      />
+      <Suspense
+        fallback={
+          <div className="min-h-screen w-full bg-[#EEF1F7] dark:bg-[#070A12] flex items-center justify-center p-6">
+            <div
+              role="status"
+              className="px-6 py-4 rounded-2xl bg-white dark:bg-[#0E1322] border border-[#E2E5EE] dark:border-slate-800 text-[14px] font-medium text-slate-700 dark:text-slate-200 shadow-sm"
+            >
+              Загрузка ARS LLM...
+            </div>
+          </div>
+        }
+      >
+        <LoginPage
+          theme={theme}
+          onSelectTheme={handleSelectTheme}
+          onLogin={handleLogin}
+        />
+      </Suspense>
     );
   }
 
@@ -1032,15 +1132,9 @@ export default function App() {
         {/* Left Sidebar */}
         <Sidebar
           activeNav={activeNav}
-          onSelectNav={(nav) => {
-            setActiveNav(nav);
-            setActiveSessionId(null);
-          }}
+          onSelectNav={handleSidebarSelectNav}
           activeCategoryId={activeCategoryId}
-          onSelectCategory={(catId) => {
-            setActiveCategoryId(catId);
-            setActiveSessionId(null);
-          }}
+          onSelectCategory={handleSidebarSelectCategory}
           chatLists={chatLists}
           onCreateList={handleCreateList}
           sessions={sessions}
@@ -1051,22 +1145,17 @@ export default function App() {
           user={user}
           quotas={quotas}
           avatarColor={profileAvatarColor}
-          onOpenProfile={() => setProfileModalOpen(true)}
+          onOpenProfile={handleOpenProfile}
           onLogout={handleLogout}
           isDemoMode={isDemoMode}
           onSwitchDemoRole={handleSwitchDemoRole}
           searchQuery={searchQuery}
-          onSearchChange={(q) => {
-            setSearchQuery(q);
-            if (q.trim() && activeSessionId) {
-              setActiveSessionId(null);
-            }
-          }}
-          onOpenCommandSearch={() => setCommandSearchOpen(true)}
+          onSearchChange={handleSidebarSearchChange}
+          onOpenCommandSearch={handleOpenCommandSearch}
           collapsed={sidebarCollapsed}
-          onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+          onToggleCollapse={handleToggleCollapse}
           mobileOpen={mobileMenuOpen}
-          onCloseMobile={() => setMobileMenuOpen(false)}
+          onCloseMobile={handleCloseMobile}
         />
 
         {/* Right Main Content Area */}
@@ -1076,7 +1165,7 @@ export default function App() {
             theme={theme}
             onSelectTheme={handleSelectTheme}
             onNewChat={handleNewChat}
-            onOpenMobileMenu={() => setMobileMenuOpen(true)}
+            onOpenMobileMenu={handleOpenMobileMenu}
             exportSession={activeSession}
           />
 
@@ -1108,8 +1197,8 @@ export default function App() {
                   promptValue={promptValue}
                   onPromptChange={setPromptValue}
                   onSubmitPrompt={handleSubmitPrompt}
-                  onOpenPromptLibrary={() => setPromptLibraryOpen(true)}
-                  onOpenModelParams={() => setModelParamsOpen(true)}
+                  onOpenPromptLibrary={handleOpenPromptLibrary}
+                  onOpenModelParams={handleOpenModelParams}
                   quotaBlockStatus={quotaBlockStatus}
                   onOpenQuotasView={handleOpenQuotasView}
                 />
@@ -1135,8 +1224,8 @@ export default function App() {
                 promptValue={promptValue}
                 onPromptChange={setPromptValue}
                 onSubmitPrompt={handleSubmitPrompt}
-                onOpenPromptLibrary={() => setPromptLibraryOpen(true)}
-                onOpenModelParams={() => setModelParamsOpen(true)}
+                onOpenPromptLibrary={handleOpenPromptLibrary}
+                onOpenModelParams={handleOpenModelParams}
                 onToggleStar={handleToggleStar}
                 onBackToWelcome={handleNewChat}
                 isStreaming={isStreaming}
@@ -1149,97 +1238,122 @@ export default function App() {
                 onOpenQuotasView={handleOpenQuotasView}
               />
             ) : (
-              <WorkspaceSectionView
-                activeNav={activeNav}
-                activeCategoryLabel={activeCategory?.label ?? null}
-                sessions={filteredContent.sessions}
-                projects={INITIAL_PROJECTS}
-                templates={filteredContent.templates}
-                documents={filteredContent.documents}
-                onOpenSession={(sess) => {
-                  handleSelectSession(sess.id);
-                }}
-                onUseTemplate={(tplText) => {
-                  setPromptValue(tplText);
-                  setActiveSessionId(null);
-                  setActiveCategoryId(null);
-                  setActiveNav('chats');
-                  setSearchQuery('');
-                }}
-                onResetToNewChat={handleNewChat}
-                isDemoMode={isDemoMode}
-                user={user}
-                quotas={quotas}
-                persistedAdminUsers={adminUsers}
-                onUpdateAdminUsers={(updatedUsers) => {
-                  setAdminUsers(updatedUsers);
-                }}
-              />
+              <Suspense
+                fallback={
+                  <div className="max-w-[920px] mx-auto w-full px-6 py-8 text-[13.5px] text-slate-500 dark:text-slate-400">
+                    Загрузка раздела...
+                  </div>
+                }
+              >
+                <WorkspaceSectionView
+                  activeNav={activeNav}
+                  activeCategoryLabel={activeCategory?.label ?? null}
+                  sessions={filteredContent.sessions}
+                  projects={INITIAL_PROJECTS}
+                  templates={filteredContent.templates}
+                  documents={filteredContent.documents}
+                  onOpenSession={(sess) => {
+                    handleSelectSession(sess.id);
+                  }}
+                  onUseTemplate={(tplText) => {
+                    setPromptValue(tplText);
+                    setActiveSessionId(null);
+                    setActiveCategoryId(null);
+                    setActiveNav('chats');
+                    setSearchQuery('');
+                  }}
+                  onResetToNewChat={handleNewChat}
+                  isDemoMode={isDemoMode}
+                  user={user}
+                  quotas={quotas}
+                  persistedAdminUsers={adminUsers}
+                  onUpdateAdminUsers={(updatedUsers) => {
+                    setAdminUsers(updatedUsers);
+                  }}
+                  streamDiagnostics={streamDiagnostics}
+                />
+              </Suspense>
             )}
           </main>
         </div>
       </div>
 
-      {/* Accessible Modals */}
-      <PromptLibraryModal
-        open={promptLibraryOpen}
-        templates={INITIAL_TEMPLATES}
-        onClose={() => setPromptLibraryOpen(false)}
-        onSelectTemplate={(tplText) => {
-          setPromptValue(tplText);
-        }}
-      />
+      {/* Accessible Modals (loaded lazily on open) */}
+      {promptLibraryOpen && (
+        <Suspense fallback={null}>
+          <PromptLibraryModal
+            open={promptLibraryOpen}
+            templates={INITIAL_TEMPLATES}
+            onClose={() => setPromptLibraryOpen(false)}
+            onSelectTemplate={(tplText) => {
+              setPromptValue(tplText);
+            }}
+          />
+        </Suspense>
+      )}
 
-      <ModelParamsModal
-        open={modelParamsOpen}
-        params={modelParams}
-        onSave={setModelParams}
-        onClose={() => setModelParamsOpen(false)}
-      />
+      {modelParamsOpen && (
+        <Suspense fallback={null}>
+          <ModelParamsModal
+            open={modelParamsOpen}
+            params={modelParams}
+            onSave={setModelParams}
+            onClose={() => setModelParamsOpen(false)}
+          />
+        </Suspense>
+      )}
 
-      <CommandSearchModal
-        open={commandSearchOpen}
-        query={searchQuery}
-        onQueryChange={setSearchQuery}
-        sessions={filteredContent.sessions}
-        templates={filteredContent.templates}
-        onSelectSession={(sess) => {
-          handleSelectSession(sess.id);
-        }}
-        onSelectTemplate={(tplText) => {
-          setPromptValue(tplText);
-          setActiveSessionId(null);
-          setActiveCategoryId(null);
-          setActiveNav('chats');
-        }}
-        onClose={() => setCommandSearchOpen(false)}
-      />
+      {commandSearchOpen && (
+        <Suspense fallback={null}>
+          <CommandSearchModal
+            open={commandSearchOpen}
+            query={searchQuery}
+            onQueryChange={setSearchQuery}
+            sessions={filteredContent.sessions}
+            templates={filteredContent.templates}
+            onSelectSession={(sess) => {
+              handleSelectSession(sess.id);
+            }}
+            onSelectTemplate={(tplText) => {
+              setPromptValue(tplText);
+              setActiveSessionId(null);
+              setActiveCategoryId(null);
+              setActiveNav('chats');
+            }}
+            onClose={() => setCommandSearchOpen(false)}
+          />
+        </Suspense>
+      )}
 
-      <ProfileModal
-        open={profileModalOpen}
-        user={user}
-        quotas={quotas}
-        personalInstructions={personalInstructions}
-        avatarColor={profileAvatarColor}
-        onSaveProfile={async ({ name, personalInstructions: nextInstructions, avatarColor }) => {
-          setProfileDisplayName(name);
-          setPersonalInstructions(nextInstructions);
-          setProfileAvatarColor(avatarColor);
-          setUser((prev) => (prev ? { ...prev, name } : prev));
-          if (!isDemoMode) {
-            try {
-              const updated = await authApi.updateProfile({
-                name,
-                personalInstructions: nextInstructions,
-              });
-              setUser((prev) => (prev ? { ...prev, ...updated.user } : updated.user));
-            } catch {
-              // Keep local state if backend endpoint is unreachable in standalone mode
-            }
-          }
-        }}
-        onClose={() => setProfileModalOpen(false)}
-      />
+      {profileModalOpen && (
+        <Suspense fallback={null}>
+          <ProfileModal
+            open={profileModalOpen}
+            user={user}
+            quotas={quotas}
+            personalInstructions={personalInstructions}
+            avatarColor={profileAvatarColor}
+            onSaveProfile={async ({ name, personalInstructions: nextInstructions, avatarColor }) => {
+              setProfileDisplayName(name);
+              setPersonalInstructions(nextInstructions);
+              setProfileAvatarColor(avatarColor);
+              setUser((prev) => (prev ? { ...prev, name } : prev));
+              if (!isDemoMode) {
+                try {
+                  const updated = await authApi.updateProfile({
+                    name,
+                    personalInstructions: nextInstructions,
+                  });
+                  setUser((prev) => (prev ? { ...prev, ...updated.user } : updated.user));
+                } catch {
+                  // Keep local state if backend endpoint is unreachable in standalone mode
+                }
+              }
+            }}
+            onClose={() => setProfileModalOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

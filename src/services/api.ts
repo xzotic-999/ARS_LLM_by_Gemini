@@ -180,7 +180,11 @@ export function parseSseLines(rawBuffer: string): {
         continue;
       }
 
-      const token = parsed?.choices?.[0]?.delta?.content;
+      const rawDelta = parsed?.choices?.[0]?.delta?.content;
+      const token =
+        typeof rawDelta === 'string' && rawDelta.length > 0
+          ? rawDelta
+          : parsed?.choices?.[0]?.message?.content;
       if (typeof token === 'string' && token.length > 0) {
         events.push({ type: 'delta', content: token });
       }
@@ -411,6 +415,15 @@ export const messagesApi = {
     }),
 };
 
+export interface StreamMetrics {
+  sentAtIso: string;
+  ttftMs: number | null;
+  totalMs: number;
+  chunkCount: number;
+  charCount: number;
+  mode: 'stream' | 'json-fallback' | 'error' | 'aborted';
+}
+
 export const chatApi = {
   completions: (messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>) =>
     request<{
@@ -426,10 +439,31 @@ export const chatApi = {
     onToken: (token: string) => void,
     onDone: () => void,
     onError: (err: Error) => void,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    onMetrics?: (metrics: StreamMetrics) => void
   ): Promise<void> => {
     const maxClientAttempts = 2;
     let lastError: Error | null = null;
+    const sentAtMs = Date.now();
+    const sentAtIso = new Date(sentAtMs).toISOString();
+    let firstTokenAtMs: number | null = null;
+    let chunkCount = 0;
+    let charCount = 0;
+
+    const emitMetrics = (mode: StreamMetrics['mode']) => {
+      if (!onMetrics) return;
+      const totalMs = Math.max(0, Date.now() - sentAtMs);
+      const ttftMs =
+        firstTokenAtMs !== null ? Math.max(0, firstTokenAtMs - sentAtMs) : null;
+      onMetrics({
+        sentAtIso,
+        ttftMs,
+        totalMs,
+        chunkCount,
+        charCount,
+        mode,
+      });
+    };
 
     for (let attempt = 0; attempt < maxClientAttempts; attempt++) {
       let receivedAnyToken = false;
@@ -439,6 +473,7 @@ export const chatApi = {
         const useStream = attempt === 0;
         const streamHeaders: Record<string, string> = {
           'Content-Type': 'application/json',
+          Accept: useStream ? 'text/event-stream, application/json' : 'application/json',
         };
         const sessionToken = readStoredSessionToken();
         if (sessionToken) {
@@ -489,8 +524,12 @@ export const chatApi = {
           const data = await res.json().catch(() => null);
           const fullText = data?.choices?.[0]?.message?.content;
           if (typeof fullText === 'string' && fullText.trim().length > 0) {
+            firstTokenAtMs ??= Date.now();
             receivedAnyToken = true;
+            chunkCount += 1;
+            charCount += fullText.length;
             onToken(fullText);
+            emitMetrics('json-fallback');
             onDone();
             return;
           }
@@ -505,22 +544,20 @@ export const chatApi = {
         const decoder = new TextDecoder();
         let buffer = '';
         let finished = false;
+        let sawDone = false;
         let streamErrorObj: Error | null = null;
 
-        while (!finished) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const { events, remainingBuffer } = parseSseLines(buffer);
-          buffer = remainingBuffer;
-
+        const handleEvents = (events: ParsedSseEvent[]): 'continue' | 'done' | 'error' => {
           for (const ev of events) {
             if (ev.type === 'delta') {
+              if (firstTokenAtMs === null) {
+                firstTokenAtMs = Date.now();
+              }
               receivedAnyToken = true;
+              chunkCount += 1;
+              charCount += ev.content.length;
               onToken(ev.content);
             } else if (ev.type === 'error') {
-              finished = true;
               streamErrorObj =
                 ev.code === 'QUOTA_EXCEEDED'
                   ? new ApiError(429, ev.message, {
@@ -531,23 +568,58 @@ export const chatApi = {
                       quotas: ev.quotas,
                     })
                   : new Error(ev.message);
-              break;
+              return 'error';
             } else if (ev.type === 'done') {
-              finished = true;
-              if (receivedAnyToken || signal?.aborted) {
-                onDone();
-                return;
-              }
-              streamErrorObj = new Error(
-                'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.'
-              );
-              break;
+              return 'done';
             }
           }
+          return 'continue';
+        };
+
+        try {
+          while (!finished) {
+            const { done, value } = await reader.read();
+            if (done) {
+              buffer += decoder.decode();
+              if (buffer.trim().length > 0) {
+                const finalParsed = parseSseLines(`${buffer}\n`);
+                buffer = finalParsed.remainingBuffer;
+                const status = handleEvents(finalParsed.events);
+                if (status === 'done') sawDone = true;
+                if (status !== 'continue') finished = true;
+              }
+              break;
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            const { events, remainingBuffer } = parseSseLines(buffer);
+            buffer = remainingBuffer;
+
+            const status = handleEvents(events);
+            if (status === 'done') {
+              sawDone = true;
+              finished = true;
+            } else if (status === 'error') {
+              finished = true;
+            }
+          }
+        } finally {
+          reader.releaseLock();
         }
 
         if (streamErrorObj) {
           throw streamErrorObj;
+        }
+
+        if (sawDone) {
+          if (receivedAnyToken || signal?.aborted) {
+            emitMetrics(signal?.aborted ? 'aborted' : 'stream');
+            onDone();
+            return;
+          }
+          throw new Error(
+            'Сервер завершил поток без текста ответа. Проверьте подключение к FreeLLMAPI.'
+          );
         }
 
         if (!receivedAnyToken && !signal?.aborted) {
@@ -556,10 +628,12 @@ export const chatApi = {
           );
         }
 
+        emitMetrics(signal?.aborted ? 'aborted' : 'stream');
         onDone();
         return;
       } catch (err) {
         if (signal?.aborted) {
+          emitMetrics('aborted');
           onDone();
           return;
         }
@@ -569,12 +643,14 @@ export const chatApi = {
           receivedAnyToken ||
           (err instanceof ApiError && (err.status === 401 || err.status === 429))
         ) {
+          emitMetrics('error');
           onError(lastError);
           return;
         }
       }
     }
 
+    emitMetrics('error');
     onError(
       lastError ??
         new Error('Сервер генерации временно недоступен. Нажмите «Повторить запрос».')

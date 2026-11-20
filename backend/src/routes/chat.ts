@@ -16,6 +16,13 @@ import {
 
 const router = Router();
 
+function flushSseResponse(res: unknown): void {
+  const maybeFlush = (res as { flush?: () => void })?.flush;
+  if (typeof maybeFlush === "function") {
+    maybeFlush.call(res);
+  }
+}
+
 router.use(requireAuth);
 
 // POST /api/v1/chat/completions
@@ -114,6 +121,7 @@ router.post("/completions", async (req, res, next) => {
         res.status(429);
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
         res.write(
           `event: error\ndata: ${JSON.stringify({
@@ -121,6 +129,7 @@ router.post("/completions", async (req, res, next) => {
             quotas: reservation.quotas,
           })}\n\n`
         );
+        flushSseResponse(res);
         res.end();
         return;
       }
@@ -156,6 +165,7 @@ router.post("/completions", async (req, res, next) => {
           res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
           res.setHeader("Cache-Control", "no-cache, no-transform");
           res.setHeader("Connection", "keep-alive");
+          res.setHeader("X-Accel-Buffering", "no");
           res.flushHeaders();
 
           res.write(
@@ -181,6 +191,7 @@ router.post("/completions", async (req, res, next) => {
             })}\n\n`
           );
           res.write("data: [DONE]\n\n");
+          flushSseResponse(res);
           res.end();
           return;
         }
@@ -222,6 +233,7 @@ router.post("/completions", async (req, res, next) => {
           res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
           res.setHeader("Cache-Control", "no-cache, no-transform");
           res.setHeader("Connection", "keep-alive");
+          res.setHeader("X-Accel-Buffering", "no");
           res.flushHeaders();
           res.write(
             `data: ${JSON.stringify({
@@ -243,6 +255,7 @@ router.post("/completions", async (req, res, next) => {
             })}\n\n`
           );
           res.write("data: [DONE]\n\n");
+          flushSseResponse(res);
           res.end();
           return;
         }
@@ -280,12 +293,20 @@ router.post("/completions", async (req, res, next) => {
         res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
         res.setHeader("Cache-Control", "no-cache, no-transform");
         res.setHeader("Connection", "keep-alive");
+        res.setHeader("X-Accel-Buffering", "no");
         res.flushHeaders();
 
         try {
+          const streamSentAtMs = Date.now();
+          let firstTokenAtMs: number | null = null;
+          let chunkCount = 0;
+          let emittedCharCount = 0;
+          let accumulatedOutput = "";
+          let restrictedTriggered = false;
+
           res.write(
             `data: ${JSON.stringify({
-              id: `chatcmpl-${Date.now()}`,
+              id: `chatcmpl-${streamSentAtMs}`,
               object: "chat.completion.chunk",
               choices: [
                 {
@@ -296,10 +317,7 @@ router.post("/completions", async (req, res, next) => {
               ],
             })}\n\n`
           );
-
-          let inspectionBuffer = "";
-          let bufferFlushed = false;
-          let emittedCharCount = 0;
+          flushSseResponse(res);
 
           for await (const token of streamChatWithFreeLlm(
             trustedMessages,
@@ -308,11 +326,16 @@ router.post("/completions", async (req, res, next) => {
             if (controller.signal.aborted || res.destroyed) {
               throw new Error("Request aborted");
             }
+            if (!token) continue;
 
-            if (!bufferFlushed) {
-              inspectionBuffer += token;
-              if (isSecurityRestrictedOutput(inspectionBuffer)) {
-                controller.abort();
+            accumulatedOutput += token;
+            if (isSecurityRestrictedOutput(accumulatedOutput)) {
+              restrictedTriggered = true;
+              controller.abort();
+              if (emittedCharCount === 0) {
+                firstTokenAtMs ??= Date.now();
+                chunkCount += 1;
+                emittedCharCount += SECURITY_REFUSAL_MESSAGE.length;
                 res.write(
                   `data: ${JSON.stringify({
                     id: `chatcmpl-${Date.now()}`,
@@ -326,14 +349,10 @@ router.post("/completions", async (req, res, next) => {
                     ],
                   })}\n\n`
                 );
-                emittedCharCount += SECURITY_REFUSAL_MESSAGE.length;
-                bufferFlushed = true;
-                inspectionBuffer = "";
-                break;
-              }
-              if (inspectionBuffer.length >= 260) {
-                bufferFlushed = true;
-                emittedCharCount += inspectionBuffer.length;
+              } else {
+                const notice = `\n\n${SECURITY_REFUSAL_MESSAGE}`;
+                chunkCount += 1;
+                emittedCharCount += notice.length;
                 res.write(
                   `data: ${JSON.stringify({
                     id: `chatcmpl-${Date.now()}`,
@@ -341,17 +360,21 @@ router.post("/completions", async (req, res, next) => {
                     choices: [
                       {
                         index: 0,
-                        delta: { content: inspectionBuffer },
+                        delta: { content: notice },
                         finish_reason: null,
                       },
                     ],
                   })}\n\n`
                 );
-                inspectionBuffer = "";
               }
-              continue;
+              flushSseResponse(res);
+              break;
             }
 
+            if (firstTokenAtMs === null) {
+              firstTokenAtMs = Date.now();
+            }
+            chunkCount += 1;
             emittedCharCount += token.length;
             res.write(
               `data: ${JSON.stringify({
@@ -366,42 +389,39 @@ router.post("/completions", async (req, res, next) => {
                 ],
               })}\n\n`
             );
+            flushSseResponse(res);
           }
 
-          if (controller.signal.aborted || res.destroyed) {
+          if (!restrictedTriggered && (controller.signal.aborted || res.destroyed)) {
             throw new Error("Request aborted");
-          }
-
-          if (!bufferFlushed && inspectionBuffer.length > 0) {
-            const safeOut = isSecurityRestrictedOutput(inspectionBuffer)
-              ? SECURITY_REFUSAL_MESSAGE
-              : inspectionBuffer;
-            emittedCharCount += safeOut.length;
-            res.write(
-              `data: ${JSON.stringify({
-                id: `chatcmpl-${Date.now()}`,
-                object: "chat.completion.chunk",
-                choices: [
-                  {
-                    index: 0,
-                    delta: { content: safeOut },
-                    finish_reason: null,
-                  },
-                ],
-              })}\n\n`
-            );
           }
 
           if (emittedCharCount === 0) {
             throw new Error("FreeLLMAPI returned an empty stream");
           }
 
+          const totalMs = Date.now() - streamSentAtMs;
+          const ttftMs =
+            firstTokenAtMs !== null ? firstTokenAtMs - streamSentAtMs : totalMs;
+
           await reservation.commit({
             mode: "stream",
             message_count: messages.length,
             last_message_length: lastMessage.content.length,
             reply_length: emittedCharCount,
+            ttft_ms: ttftMs,
+            total_ms: totalMs,
+            chunk_count: chunkCount,
           });
+
+          if (env.NODE_ENV !== "production") {
+            console.info("[chat/stream] metrics", {
+              ttftMs,
+              totalMs,
+              chunkCount,
+              replyLength: emittedCharCount,
+            });
+          }
 
           res.write(
             `data: ${JSON.stringify({
@@ -417,6 +437,7 @@ router.post("/completions", async (req, res, next) => {
           );
 
           res.write("data: [DONE]\n\n");
+          flushSseResponse(res);
           res.end();
         } catch (err) {
           const isCancelled =
@@ -441,16 +462,17 @@ router.post("/completions", async (req, res, next) => {
           );
 
           if (!isCancelled && !res.destroyed && !res.writableEnded) {
-            console.error(
-              "Chat streaming failed:",
-              err instanceof Error ? err.message : "Unknown error"
-            );
+            const safeErrMessage =
+              err instanceof Error && err.message
+                ? err.message
+                : "Chat generation failed.";
+            console.error("Chat streaming failed:", safeErrMessage);
 
             res.write(
               `event: error\ndata: ${JSON.stringify({
                 error: {
                   code: isTimeout ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR",
-                  message: "Chat generation failed.",
+                  message: safeErrMessage,
                 },
               })}\n\n`
             );
@@ -463,6 +485,7 @@ router.post("/completions", async (req, res, next) => {
 
       // Non-streaming completion
       try {
+        const unarySentAtMs = Date.now();
         const rawReply = await chatWithFreeLlm(
           trustedMessages,
           env,
@@ -477,12 +500,15 @@ router.post("/completions", async (req, res, next) => {
         const reply = isSecurityRestrictedOutput(rawReply)
           ? SECURITY_REFUSAL_MESSAGE
           : rawReply;
+        const unaryTotalMs = Date.now() - unarySentAtMs;
 
         await reservation.commit({
           mode: "unary",
           message_count: messages.length,
           last_message_length: lastMessage.content.length,
           reply_length: reply.length,
+          total_ms: unaryTotalMs,
+          chunk_count: 1,
         });
 
         const updatedQuotas = await getUserQuotaStatus(userId);
@@ -526,7 +552,18 @@ router.post("/completions", async (req, res, next) => {
         if (isCancelled) {
           return;
         }
-        throw err;
+        const safeErrMessage =
+          err instanceof Error && err.message
+            ? err.message
+            : "Ошибка генерации ответа от ИИ-провайдера.";
+        console.error("Chat completion failed:", safeErrMessage);
+        res.status(isTimeout ? 504 : 502).json({
+          error: {
+            code: isTimeout ? "PROVIDER_TIMEOUT" : "PROVIDER_ERROR",
+            message: safeErrMessage,
+          },
+        });
+        return;
       }
     } finally {
       req.off("aborted", abortOnDisconnect);

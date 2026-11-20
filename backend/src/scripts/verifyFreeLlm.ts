@@ -16,11 +16,15 @@ process.env.POSTGRES_DB = process.env.POSTGRES_DB || "ars_llm_db";
 async function main() {
   const { verifyFreeLlmConnection } = await import("../services/freeLlm.js");
 
-  const targetBaseUrl =
-    process.env.FREELLM_API_BASE_URL?.trim() ||
-    "https://v7skvft7-31415.euw.devtunnels.ms/v1";
+  const targetBaseUrl = process.env.FREELLM_API_BASE_URL?.trim() || "";
   const targetModel = process.env.FREELLM_MODEL?.trim() || "auto";
   const rawApiKey = process.env.FREELLM_API_KEY?.trim() || "";
+
+  if (!targetBaseUrl) {
+    console.error("FREELLM_API_BASE_URL is not set in environment or .env");
+    process.exitCode = 1;
+    return;
+  }
 
   const report = await verifyFreeLlmConnection({
     FREELLM_API_BASE_URL: targetBaseUrl,
