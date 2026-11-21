@@ -18,6 +18,8 @@ export interface ConversationRecord {
   title: string | null;
   created_at: string;
   last_message_at: string | null;
+  archived_at?: string | null;
+  deleted_at?: string | null;
   messages?: MessageRecord[];
 }
 
@@ -370,8 +372,11 @@ export const authApi = {
   },
 };
 
+export type ConversationStatusFilter = 'active' | 'archived' | 'deleted' | 'all';
+
 export const conversationsApi = {
-  list: () => request<ConversationRecord[]>('/conversations'),
+  list: (status: ConversationStatusFilter = 'all') =>
+    request<ConversationRecord[]>(`/conversations?status=${encodeURIComponent(status)}`),
 
   get: (id: number) =>
     request<ConversationRecord & { messages: MessageRecord[] }>(`/conversations/${id}`),
@@ -388,10 +393,25 @@ export const conversationsApi = {
       body: JSON.stringify({ title }),
     }),
 
-  delete: (id: number) =>
-    request<void>(`/conversations/${id}`, {
-      method: 'DELETE',
+  archive: (id: number, archived = true) =>
+    request<ConversationRecord>(`/conversations/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ archived }),
     }),
+
+  restore: (id: number, fromArchive = false) =>
+    request<ConversationRecord>(`/conversations/${id}/restore`, {
+      method: 'POST',
+      body: JSON.stringify({ fromArchive }),
+    }),
+
+  delete: (id: number, permanent = false) =>
+    request<ConversationRecord | void>(
+      `/conversations/${id}${permanent ? '?permanent=true' : ''}`,
+      {
+        method: 'DELETE',
+      }
+    ),
 };
 
 export const messagesApi = {

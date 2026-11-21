@@ -13,6 +13,9 @@ import {
   ThumbsDown,
   Pencil,
   ArrowDown,
+  Archive,
+  ArchiveRestore,
+  Trash2,
 } from 'lucide-react';
 import {
   ChatMessage,
@@ -47,6 +50,9 @@ interface ChatThreadViewProps {
   onEditUserPrompt?: (messageId: string, content: string) => void;
   quotaBlockStatus?: QuotaBlockStatus | null;
   onOpenQuotasView?: () => void;
+  onArchiveSession?: (sessionId: string) => Promise<void> | void;
+  onUnarchiveSession?: (sessionId: string) => Promise<void> | void;
+  onDeleteSession?: (sessionId: string) => Promise<void> | void;
 }
 
 interface ChatMessageRowProps {
@@ -382,6 +388,9 @@ export const ChatThreadView = React.memo<ChatThreadViewProps>(({
   onEditUserPrompt,
   quotaBlockStatus = null,
   onOpenQuotasView,
+  onArchiveSession,
+  onUnarchiveSession,
+  onDeleteSession,
 }) => {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
@@ -584,6 +593,46 @@ export const ChatThreadView = React.memo<ChatThreadViewProps>(({
                 aria-hidden="true"
               />
             </button>
+
+            {!session.deletedAt && (
+              <>
+                {session.archivedAt
+                  ? onUnarchiveSession && (
+                      <button
+                        type="button"
+                        onClick={() => onUnarchiveSession(session.id)}
+                        aria-label="Восстановить из архива"
+                        title="Восстановить из архива"
+                        className="focus-ring px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-700/80 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-[12px] font-medium flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors"
+                      >
+                        <ArchiveRestore className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span className="hidden sm:inline">Из архива</span>
+                      </button>
+                    )
+                  : onArchiveSession && (
+                      <button
+                        type="button"
+                        onClick={() => onArchiveSession(session.id)}
+                        aria-label="Переместить чат в архив"
+                        title="В архив"
+                        className="focus-ring p-1.5 rounded-lg border border-slate-200 dark:border-slate-700/80 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                      >
+                        <Archive className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                    )}
+                {onDeleteSession && (
+                  <button
+                    type="button"
+                    onClick={() => onDeleteSession(session.id)}
+                    aria-label="Удалить чат в корзину"
+                    title="Удалить"
+                    className="focus-ring p-1.5 rounded-lg border border-slate-200 dark:border-slate-700/80 text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>

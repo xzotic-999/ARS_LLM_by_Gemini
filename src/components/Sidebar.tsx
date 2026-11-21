@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Search,
   Folder,
@@ -16,6 +16,7 @@ import {
   Pencil,
   Trash2,
   MessageSquare,
+  Archive,
 } from 'lucide-react';
 import { ArsLogo } from './ArsLogo';
 import {
@@ -23,7 +24,9 @@ import {
   ChatSession,
   NavSectionId,
   canConfigureQuotas,
+  computeChatListCategories,
   deduplicateSessions,
+  getSessionsForCategory,
 } from '../utils/dashboardLogic';
 import { QuotaLimits, UserProfile } from '../services/api';
 
@@ -38,6 +41,7 @@ interface SidebarProps {
   activeSessionId?: string | null;
   onSelectSession?: (sessionId: string) => void;
   onRenameSession?: (sessionId: string, newTitle: string) => Promise<void> | void;
+  onArchiveSession?: (sessionId: string) => Promise<void> | void;
   onDeleteSession?: (sessionId: string) => Promise<void> | void;
   user?: UserProfile | null;
   quotas?: QuotaLimits | null;
@@ -77,6 +81,7 @@ export const Sidebar = React.memo<SidebarProps>(({
   activeSessionId = null,
   onSelectSession,
   onRenameSession,
+  onArchiveSession,
   onDeleteSession,
   user = null,
   quotas = null,
@@ -104,6 +109,14 @@ export const Sidebar = React.memo<SidebarProps>(({
   const isAdmin = canConfigureQuotas(user);
   const visibleNavItems = BASE_NAV_ITEMS.filter(
     (item) => !item.adminOnly || isAdmin
+  );
+  const computedChatLists = useMemo(
+    () => computeChatListCategories(chatLists, sessions),
+    [chatLists, sessions]
+  );
+  const activeSessions = useMemo(
+    () => getSessionsForCategory(sessions, null),
+    [sessions]
   );
 
   const handleCreateListSubmit = (e: React.FormEvent) => {
@@ -269,8 +282,8 @@ export const Sidebar = React.memo<SidebarProps>(({
           </div>
         )}
 
-        {chatLists.map((list) => {
-          const isSelected = activeCategoryId === list.id;
+        {computedChatLists.map((list) => {
+          const isSelected = activeCategoryId === list.id && !activeSessionId;
           return (
             <button
               key={list.id}
@@ -281,6 +294,7 @@ export const Sidebar = React.memo<SidebarProps>(({
                 onCloseMobile();
               }}
               aria-pressed={isSelected}
+              data-testid={`chat-list-item-${list.id}`}
               className={`focus-ring w-full flex items-center ${
                 collapsed ? 'justify-center px-0' : 'justify-between px-3'
               } h-[34px] rounded-xl text-[13px] transition-colors whitespace-nowrap ${
@@ -304,8 +318,15 @@ export const Sidebar = React.memo<SidebarProps>(({
                 )}
                 {!collapsed && <span className="truncate">{list.label}</span>}
               </span>
-              {!collapsed && isSelected && (
-                <span className="text-[11px] text-[#4F46E5] dark:text-indigo-300 tabular-nums">
+              {!collapsed && (
+                <span
+                  data-testid={`chat-list-count-${list.id}`}
+                  className={`text-[11px] tabular-nums ${
+                    isSelected
+                      ? 'text-[#4F46E5] dark:text-indigo-300 font-semibold'
+                      : 'text-[#6B7280] dark:text-slate-400'
+                  }`}
+                >
                   {list.count}
                 </span>
               )}
@@ -392,13 +413,13 @@ export const Sidebar = React.memo<SidebarProps>(({
           </form>
         )}
 
-        {/* Recent Conversations Section */}
-        {!collapsed && sessions.length > 0 && onSelectSession && (
+        {/* Recent Conversations Section (active chats only) */}
+        {!collapsed && activeSessions.length > 0 && onSelectSession && (
           <div className="pt-2.5 space-y-0.5">
             <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
               НЕДАВНИЕ ДИАЛОГИ
             </div>
-            {deduplicateSessions(sessions).slice(0, 8).map((sess) => {
+            {deduplicateSessions(activeSessions).slice(0, 8).map((sess) => {
               const isCurrent = activeSessionId === sess.id;
               const isEditing = editingSessionId === sess.id;
 
@@ -461,7 +482,7 @@ export const Sidebar = React.memo<SidebarProps>(({
                     <span className="truncate">{sess.title}</span>
                   </button>
 
-                  {(onRenameSession || onDeleteSession) && (
+                  {(onRenameSession || onArchiveSession || onDeleteSession) && (
                     <div className="hidden group-hover:flex focus-within:flex items-center gap-0.5 shrink-0 ml-1">
                       {onRenameSession && (
                         <button
@@ -473,11 +494,23 @@ export const Sidebar = React.memo<SidebarProps>(({
                           <Pencil className="w-3 h-3" />
                         </button>
                       )}
+                      {onArchiveSession && (
+                        <button
+                          type="button"
+                          onClick={() => onArchiveSession(sess.id)}
+                          aria-label={`В архив «${sess.title}»`}
+                          title="В архив"
+                          className="focus-ring p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+                        >
+                          <Archive className="w-3 h-3" />
+                        </button>
+                      )}
                       {onDeleteSession && (
                         <button
                           type="button"
                           onClick={() => onDeleteSession(sess.id)}
                           aria-label={`Удалить диалог «${sess.title}»`}
+                          title="Удалить"
                           className="focus-ring p-1 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400"
                         >
                           <Trash2 className="w-3 h-3" />

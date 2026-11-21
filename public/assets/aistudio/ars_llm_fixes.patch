@@ -1,0 +1,2418 @@
+diff --git a/backend/src/migrations/006_conversations_archive_and_soft_delete.sql b/backend/src/migrations/006_conversations_archive_and_soft_delete.sql
+new file mode 100644
+index 0000000..a12d27c
+--- /dev/null
++++ b/backend/src/migrations/006_conversations_archive_and_soft_delete.sql
+@@ -0,0 +1,9 @@
++-- Additive, non-destructive migration for conversation archiving and soft deletion.
++ALTER TABLE conversations
++ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP NULL;
++
++ALTER TABLE conversations
++ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL;
++
++CREATE INDEX IF NOT EXISTS idx_conversations_user_state
++ON conversations(user_id, deleted_at, archived_at, last_message_at DESC);
+diff --git a/backend/src/routes/admin.ts b/backend/src/routes/admin.ts
+index 8ed61a2..64ce164 100644
+--- a/backend/src/routes/admin.ts
++++ b/backend/src/routes/admin.ts
+@@ -259,25 +259,76 @@ router.get("/usage", async (req, res, next) => {
+       100,
+       Math.max(1, parseInt(req.query.limit as string, 10) || 50)
+     );
++    const rawDays = parseInt(req.query.days as string, 10);
++    const days = !isNaN(rawDays) && rawDays > 0 ? Math.min(365, rawDays) : 30;
++    const rawUserId = req.query.user_id
++      ? parseInt(req.query.user_id as string, 10)
++      : null;
++    const filterUserId = rawUserId !== null && !isNaN(rawUserId) ? rawUserId : null;
++    const filterEventType =
++      typeof req.query.event_type === "string" && req.query.event_type.trim().length > 0
++        ? req.query.event_type.trim()
++        : null;
++
++    const filterConditions: string[] = [
++      "ue.created_at >= CURRENT_TIMESTAMP - make_interval(days => $1)",
++    ];
++    const filterParams: unknown[] = [days];
++
++    if (filterUserId !== null) {
++      filterParams.push(filterUserId);
++      filterConditions.push(`ue.user_id = $${filterParams.length}`);
++    }
++
++    if (filterEventType !== null) {
++      filterParams.push(filterEventType);
++      filterConditions.push(`ue.event_type = $${filterParams.length}`);
++    }
+ 
+-    const [eventsRes, summaryRes] = await Promise.all([
++    const whereClause = `WHERE ${filterConditions.join(" AND ")}`;
++    const eventsParams = [...filterParams, limit];
++    const limitPlaceholder = `$${eventsParams.length}`;
++
++    const [eventsRes, summaryRes, dailyRes] = await Promise.all([
++      pool.query(
++        `SELECT
++           ue.id,
++           ue.user_id,
++           COALESCE(u.email, '') AS user_email,
++           ue.event_type,
++           COALESCE(ue.metadata, ue.event_data) AS metadata,
++           ue.created_at
++         FROM usage_events ue
++         LEFT JOIN users u ON u.id = ue.user_id
++         ${whereClause}
++         ORDER BY ue.created_at DESC
++         LIMIT ${limitPlaceholder}`,
++        eventsParams
++      ),
+       pool.query(
+-        `SELECT id, user_id, event_type, event_data, created_at
+-         FROM usage_events
+-         ORDER BY created_at DESC
+-         LIMIT $1`,
+-        [limit]
++        `SELECT ue.event_type, COUNT(*)::int AS count
++         FROM usage_events ue
++         ${whereClause}
++         GROUP BY ue.event_type
++         ORDER BY count DESC, ue.event_type ASC`,
++        filterParams
+       ),
+       pool.query(
+-        `SELECT event_type, COUNT(*)::int AS count
+-         FROM usage_events
+-         GROUP BY event_type`
++        `SELECT
++           to_char(ue.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
++           ue.event_type,
++           COUNT(*)::int AS count
++         FROM usage_events ue
++         ${whereClause}
++         GROUP BY 1, ue.event_type
++         ORDER BY date DESC, ue.event_type ASC`,
++        filterParams
+       ),
+     ]);
+ 
+     res.json({
+       summary: summaryRes.rows,
+-      daily: [],
++      daily: dailyRes.rows,
+       events: eventsRes.rows,
+     });
+   } catch (err) {
+diff --git a/backend/src/routes/conversations.ts b/backend/src/routes/conversations.ts
+index ceb2448..54c7d89 100644
+--- a/backend/src/routes/conversations.ts
++++ b/backend/src/routes/conversations.ts
+@@ -7,10 +7,36 @@ const router = Router();
+ // All conversation routes require authentication.
+ router.use(requireAuth);
+ 
++export type ConversationListFilter = "active" | "archived" | "deleted" | "all";
++
++export function parseConversationStatusFilter(rawStatus: unknown): ConversationListFilter {
++  if (rawStatus === "archived" || rawStatus === "deleted" || rawStatus === "all") {
++    return rawStatus;
++  }
++  return "active";
++}
++
++function buildStatusWhereClause(filter: ConversationListFilter): string {
++  switch (filter) {
++    case "archived":
++      return "AND c.deleted_at IS NULL AND c.archived_at IS NOT NULL";
++    case "deleted":
++      return "AND c.deleted_at IS NOT NULL";
++    case "all":
++      return "";
++    case "active":
++    default:
++      return "AND c.deleted_at IS NULL AND c.archived_at IS NULL";
++  }
++}
++
+ // GET /api/v1/conversations - list the current user's conversations with messages
++// Supports ?status=active|archived|deleted|all (defaults to 'active' so deleted/archived chats do not leak into normal lists)
+ router.get("/", async (req, res, next) => {
+   try {
+     const userId = req.user!.id;
++    const statusFilter = parseConversationStatusFilter(req.query.status);
++    const statusClause = buildStatusWhereClause(statusFilter);
+ 
+     const result = await pool.query(
+       `SELECT
+@@ -18,6 +44,8 @@ router.get("/", async (req, res, next) => {
+          c.title,
+          c.created_at,
+          c.last_message_at,
++         c.archived_at,
++         c.deleted_at,
+          COALESCE(
+            (
+              SELECT json_agg(
+@@ -36,7 +64,7 @@ router.get("/", async (req, res, next) => {
+            '[]'::json
+          ) AS messages
+        FROM conversations c
+-       WHERE c.user_id = $1
++       WHERE c.user_id = $1 ${statusClause}
+        ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC`,
+       [userId]
+     );
+@@ -58,7 +86,7 @@ router.get("/:id", async (req, res, next) => {
+     }
+ 
+     const result = await pool.query(
+-      "SELECT id, title, user_id, created_at, last_message_at FROM conversations WHERE id = $1",
++      "SELECT id, title, user_id, created_at, last_message_at, archived_at, deleted_at FROM conversations WHERE id = $1",
+       [id]
+     );
+ 
+@@ -100,7 +128,7 @@ router.post("/", async (req, res, next) => {
+     const result = await pool.query(
+       `INSERT INTO conversations (title, user_id)
+        VALUES ($1, $2)
+-       RETURNING id, title, created_at, last_message_at`,
++       RETURNING id, title, created_at, last_message_at, archived_at, deleted_at`,
+       [title.trim(), userId]
+     );
+ 
+@@ -110,7 +138,7 @@ router.post("/", async (req, res, next) => {
+   }
+ });
+ 
+-// PATCH /api/v1/conversations/:id - rename a conversation
++// PATCH /api/v1/conversations/:id - rename, archive/unarchive, or soft-delete/restore a conversation
+ router.patch("/:id", async (req, res, next) => {
+   try {
+     const id = parseInt(req.params.id, 10);
+@@ -120,21 +148,42 @@ router.patch("/:id", async (req, res, next) => {
+       return;
+     }
+ 
+-    const { title } = req.body;
++    const { title, archived, deleted } = req.body ?? {};
++    const hasTitle = title !== undefined;
++    const hasArchived = archived !== undefined;
++    const hasDeleted = deleted !== undefined;
+ 
+-    if (!title || typeof title !== "string" || title.trim().length === 0) {
+-      res.status(400).json({ error: { message: "Title is required." } });
++    if (!hasTitle && !hasArchived && !hasDeleted) {
++      res.status(400).json({
++        error: { message: "Provide title, archived, or deleted to update." },
++      });
+       return;
+     }
+ 
+-    if (title.length > 255) {
+-      res.status(400).json({ error: { message: "Title must not exceed 255 characters." } });
++    if (hasTitle) {
++      if (typeof title !== "string" || title.trim().length === 0) {
++        res.status(400).json({ error: { message: "Title is required." } });
++        return;
++      }
++      if (title.length > 255) {
++        res.status(400).json({ error: { message: "Title must not exceed 255 characters." } });
++        return;
++      }
++    }
++
++    if (hasArchived && typeof archived !== "boolean") {
++      res.status(400).json({ error: { message: "archived must be a boolean." } });
++      return;
++    }
++
++    if (hasDeleted && typeof deleted !== "boolean") {
++      res.status(400).json({ error: { message: "deleted must be a boolean." } });
+       return;
+     }
+ 
+     // Ownership check
+     const ownerCheck = await pool.query(
+-      "SELECT user_id FROM conversations WHERE id = $1",
++      "SELECT user_id, archived_at, deleted_at FROM conversations WHERE id = $1",
+       [id]
+     );
+ 
+@@ -148,21 +197,96 @@ router.patch("/:id", async (req, res, next) => {
+       return;
+     }
+ 
++    if (hasArchived && archived === true && ownerCheck.rows[0].deleted_at && deleted !== false) {
++      res.status(409).json({
++        error: { message: "Cannot archive a deleted conversation. Restore it first." },
++      });
++      return;
++    }
++
++    const setClauses: string[] = [];
++    const params: unknown[] = [];
++
++    if (hasTitle) {
++      params.push(title.trim());
++      setClauses.push(`title = $${params.length}`);
++    }
++
++    if (hasArchived) {
++      if (archived) {
++        setClauses.push("archived_at = COALESCE(archived_at, CURRENT_TIMESTAMP)");
++      } else {
++        setClauses.push("archived_at = NULL");
++      }
++    }
++
++    if (hasDeleted) {
++      if (deleted) {
++        setClauses.push("deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP)");
++      } else {
++        setClauses.push("deleted_at = NULL");
++      }
++    }
++
++    params.push(id);
+     const result = await pool.query(
+       `UPDATE conversations
+-       SET title = $1
+-       WHERE id = $2
+-       RETURNING id, title, created_at, last_message_at`,
+-      [title.trim(), id]
++       SET ${setClauses.join(", ")}
++       WHERE id = $${params.length}
++       RETURNING id, title, created_at, last_message_at, archived_at, deleted_at`,
++      params
++    );
++
++    res.json(result.rows[0]);
++  } catch (err) {
++    next(err);
++  }
++});
++
++// POST /api/v1/conversations/:id/restore - restore a deleted (or archived) conversation
++router.post("/:id/restore", async (req, res, next) => {
++  try {
++    const id = parseInt(req.params.id, 10);
++
++    if (isNaN(id)) {
++      res.status(400).json({ error: { message: "Invalid conversation id." } });
++      return;
++    }
++
++    const ownerCheck = await pool.query(
++      "SELECT user_id, archived_at, deleted_at FROM conversations WHERE id = $1",
++      [id]
+     );
+ 
++    if (ownerCheck.rows.length === 0) {
++      res.status(404).json({ error: { message: "Conversation not found." } });
++      return;
++    }
++
++    if (req.user!.role !== "admin" && ownerCheck.rows[0].user_id !== req.user!.id) {
++      res.status(404).json({ error: { message: "Conversation not found." } });
++      return;
++    }
++
++    const fromArchive = Boolean(req.body?.fromArchive);
++    const updateSql = fromArchive
++      ? `UPDATE conversations
++         SET archived_at = NULL
++         WHERE id = $1
++         RETURNING id, title, created_at, last_message_at, archived_at, deleted_at`
++      : `UPDATE conversations
++         SET deleted_at = NULL
++         WHERE id = $1
++         RETURNING id, title, created_at, last_message_at, archived_at, deleted_at`;
++
++    const result = await pool.query(updateSql, [id]);
+     res.json(result.rows[0]);
+   } catch (err) {
+     next(err);
+   }
+ });
+ 
+-// DELETE /api/v1/conversations/:id - delete a conversation
++// DELETE /api/v1/conversations/:id - soft delete by default, or hard delete with ?permanent=true
+ router.delete("/:id", async (req, res, next) => {
+   try {
+     const id = parseInt(req.params.id, 10);
+@@ -174,7 +298,7 @@ router.delete("/:id", async (req, res, next) => {
+ 
+     // Ownership check
+     const ownerCheck = await pool.query(
+-      "SELECT user_id FROM conversations WHERE id = $1",
++      "SELECT user_id, deleted_at FROM conversations WHERE id = $1",
+       [id]
+     );
+ 
+@@ -188,9 +312,24 @@ router.delete("/:id", async (req, res, next) => {
+       return;
+     }
+ 
+-    await pool.query("DELETE FROM conversations WHERE id = $1", [id]);
++    const isPermanent =
++      req.query.permanent === "true" || req.query.permanent === "1";
++
++    if (isPermanent) {
++      await pool.query("DELETE FROM conversations WHERE id = $1", [id]);
++      res.status(204).send();
++      return;
++    }
++
++    const result = await pool.query(
++      `UPDATE conversations
++       SET deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP)
++       WHERE id = $1
++       RETURNING id, title, created_at, last_message_at, archived_at, deleted_at`,
++      [id]
++    );
+ 
+-    res.status(204).send();
++    res.status(200).json(result.rows[0]);
+   } catch (err) {
+     next(err);
+   }
+diff --git a/backend/src/routes/messages.ts b/backend/src/routes/messages.ts
+index 6ed90ab..7884e35 100644
+--- a/backend/src/routes/messages.ts
++++ b/backend/src/routes/messages.ts
+@@ -85,9 +85,9 @@ router.post("/", async (req, res, next) => {
+       return;
+     }
+ 
+-    // Verify conversation ownership
++    // Verify conversation ownership and ensure it is not deleted
+     const convCheck = await pool.query(
+-      "SELECT user_id FROM conversations WHERE id = $1",
++      "SELECT user_id, deleted_at FROM conversations WHERE id = $1",
+       [conversation_id]
+     );
+ 
+@@ -101,6 +101,13 @@ router.post("/", async (req, res, next) => {
+       return;
+     }
+ 
++    if (convCheck.rows[0].deleted_at) {
++      res.status(409).json({
++        error: { message: "Cannot send messages to a deleted conversation. Restore it first." },
++      });
++      return;
++    }
++
+     // For user messages: verify quota availability before persisting user turn.
+     // When defer_quota_to_completion is true (standard chat flow), /api/v1/chat/completions
+     // performs the atomic reservation before calling FreeLLMAPI so we never double-charge.
+diff --git a/backend/src/services/backendLogic.test.ts b/backend/src/services/backendLogic.test.ts
+index 227785d..d0d104f 100644
+--- a/backend/src/services/backendLogic.test.ts
++++ b/backend/src/services/backendLogic.test.ts
+@@ -700,7 +700,7 @@ test("Plesk + Neon PostgreSQL: validateEnvConfig parses quoted DATABASE_URL with
+   );
+ });
+ 
+-test("runMigrations executes all 5 SQL migrations in order inside a transaction without advisory locks and is idempotent on repeat run", async () => {
++test("runMigrations executes all 6 SQL migrations in order inside a transaction without advisory locks and is idempotent on repeat run", async () => {
+   const { runMigrations } = await import("../db/migrate.js");
+ 
+   const appliedInDb: string[] = [];
+@@ -738,7 +738,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction
+     },
+   };
+ 
+-  // First run: all 5 migrations should be applied in exact numeric order
++  // First run: all 6 migrations should be applied in exact numeric order
+   const firstRunApplied = await runMigrations(mockPoolClient);
+   assert.deepEqual(firstRunApplied, [
+     "001_initial_migration",
+@@ -746,6 +746,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction
+     "003_messages_user_id_nullable",
+     "004_messages_cascade_delete",
+     "005_users_and_auth",
++    "006_conversations_archive_and_soft_delete",
+   ]);
+   assert.deepEqual(appliedInDb, [
+     "001_initial_migration",
+@@ -753,6 +754,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction
+     "003_messages_user_id_nullable",
+     "004_messages_cascade_delete",
+     "005_users_and_auth",
++    "006_conversations_archive_and_soft_delete",
+   ]);
+   assert.ok(
+     executedQueries.includes("BEGIN") && executedQueries.includes("COMMIT"),
+@@ -763,7 +765,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction
+     "Migrations must not use session-level advisory locks that break Neon PgBouncer transaction pooler"
+   );
+ 
+-  // Second run: all 5 migrations are already recorded in `migrations` table -> 0 migrations applied
++  // Second run: all 6 migrations are already recorded in `migrations` table -> 0 migrations applied
+   const secondRunApplied = await runMigrations(mockPoolClient);
+   assert.deepEqual(secondRunApplied, []);
+ });
+@@ -2368,6 +2370,29 @@ test("True token-by-token SSE streaming: zero 260-char buffering in chat.ts, imm
+   assert.equal(unaryReply, "Непотоковый ответ");
+ });
+ 
++test("Conversations archive/soft-delete status filter and additive migration 006 preserve existing data safely", async () => {
++  const { readFileSync } = await import("node:fs");
++  const { resolve } = await import("node:path");
++  const { parseConversationStatusFilter } = await import("../routes/conversations.js");
++
++  assert.equal(parseConversationStatusFilter(undefined), "active");
++  assert.equal(parseConversationStatusFilter("active"), "active");
++  assert.equal(parseConversationStatusFilter("archived"), "archived");
++  assert.equal(parseConversationStatusFilter("deleted"), "deleted");
++  assert.equal(parseConversationStatusFilter("all"), "all");
++  assert.equal(parseConversationStatusFilter("unknown"), "active");
++
++  const migrationSql = readFileSync(
++    resolve(process.cwd(), "backend/src/migrations/006_conversations_archive_and_soft_delete.sql"),
++    "utf-8"
++  );
++  assert.match(migrationSql, /ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP NULL/i);
++  assert.match(migrationSql, /ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL/i);
++  assert.match(migrationSql, /CREATE INDEX IF NOT EXISTS idx_conversations_user_state/i);
++  assert.ok(!/\b(DROP|TRUNCATE|DELETE)\b/i.test(migrationSql), "Migration 006 must be strictly additive");
++});
++
++
+ 
+ 
+ 
+diff --git a/backend/src/types.ts b/backend/src/types.ts
+index 7ccfecb..81e8276 100644
+--- a/backend/src/types.ts
++++ b/backend/src/types.ts
+@@ -30,6 +30,8 @@ export interface Conversation {
+   user_id: number | null;
+   created_at: Date;
+   last_message_at: Date;
++  archived_at?: Date | string | null;
++  deleted_at?: Date | string | null;
+ }
+ 
+ export interface Message {
+diff --git a/server.ts b/server.ts
+index ecdbb06..6d3ca86 100644
+--- a/server.ts
++++ b/server.ts
+@@ -643,9 +643,20 @@ interface PreviewConversationRecord {
+   title: string | null;
+   created_at: string;
+   last_message_at: string | null;
++  archived_at: string | null;
++  deleted_at: string | null;
+   messages: PreviewMessageRecord[];
+ }
+ 
++interface PreviewUsageEventRecord {
++  id: number;
++  user_id: number;
++  user_email: string;
++  event_type: string;
++  metadata: Record<string, unknown> | null;
++  created_at: string;
++}
++
+ const previewUsers = new Map<string, PreviewUserRecord>([
+   [
+     'admin@ars_llm.local',
+@@ -679,9 +690,30 @@ const previewUsers = new Map<string, PreviewUserRecord>([
+ 
+ const previewSessions = new Map<string, string>(); // token -> email
+ const previewConversations = new Map<number, PreviewConversationRecord>();
++const previewUsageEvents: PreviewUsageEventRecord[] = [];
+ let nextPreviewUserId = 3;
+ let nextPreviewConvId = 101;
+ let nextPreviewMsgId = 1001;
++let nextPreviewUsageEventId = 1;
++
++function recordPreviewUsageEvent(
++  user: PreviewUserRecord | null | undefined,
++  eventType: string,
++  metadata: Record<string, unknown> | null = null
++): void {
++  if (!user) return;
++  previewUsageEvents.unshift({
++    id: nextPreviewUsageEventId++,
++    user_id: user.id,
++    user_email: user.email,
++    event_type: eventType,
++    metadata,
++    created_at: new Date().toISOString(),
++  });
++  if (previewUsageEvents.length > 200) {
++    previewUsageEvents.length = 200;
++  }
++}
+ 
+ function deriveDefaultDisplayName(email: string, role: 'user' | 'admin'): string {
+   if (role === 'admin') return 'Администратор ИТ';
+@@ -898,10 +930,36 @@ async function startServer() {
+       });
+       return;
+     }
++
++    const rawDays = parseInt(String(req.query.days ?? ''), 10);
++    const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(365, rawDays) : 30;
++    const cutoffMs = Date.now() - days * 86_400_000;
++
++    const filteredEvents = previewUsageEvents.filter(
++      (ev) => new Date(ev.created_at).getTime() >= cutoffMs
++    );
++
++    const summaryMap = new Map<string, number>();
++    const dailyMap = new Map<string, number>();
++    for (const ev of filteredEvents) {
++      summaryMap.set(ev.event_type, (summaryMap.get(ev.event_type) ?? 0) + 1);
++      const dayKey = `${ev.created_at.slice(0, 10)}|${ev.event_type}`;
++      dailyMap.set(dayKey, (dailyMap.get(dayKey) ?? 0) + 1);
++    }
++
++    const summary = Array.from(summaryMap.entries()).map(([event_type, count]) => ({
++      event_type,
++      count,
++    }));
++    const daily = Array.from(dailyMap.entries()).map(([key, count]) => {
++      const [date, event_type] = key.split('|');
++      return { date, event_type, count };
++    });
++
+     res.status(200).json({
+-      summary: [{ event_type: 'model_call', count: 42 }],
+-      daily: [],
+-      events: [],
++      summary,
++      daily,
++      events: filteredEvents.slice(0, 50),
+     });
+   });
+ 
+@@ -1035,8 +1093,15 @@ async function startServer() {
+       res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+       return;
+     }
++    const rawStatus = typeof req.query.status === 'string' ? req.query.status : 'active';
+     const list = Array.from(previewConversations.values())
+-      .filter((c) => c.user_id === userRecord.id)
++      .filter((c) => {
++        if (c.user_id !== userRecord.id) return false;
++        if (rawStatus === 'all') return true;
++        if (rawStatus === 'deleted') return Boolean(c.deleted_at);
++        if (rawStatus === 'archived') return !c.deleted_at && Boolean(c.archived_at);
++        return !c.deleted_at && !c.archived_at;
++      })
+       .sort((a, b) => (b.last_message_at || b.created_at).localeCompare(a.last_message_at || a.created_at));
+     res.status(200).json(list);
+   });
+@@ -1055,6 +1120,8 @@ async function startServer() {
+       title: rawTitle || 'Новый диалог',
+       created_at: now,
+       last_message_at: now,
++      archived_at: null,
++      deleted_at: null,
+       messages: [],
+     };
+     previewConversations.set(conv.id, conv);
+@@ -1069,7 +1136,7 @@ async function startServer() {
+     }
+     const convId = Number(req.params.id);
+     const conv = previewConversations.get(convId);
+-    if (!conv || conv.user_id !== userRecord.id) {
++    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
+       res.status(404).json({ error: { message: 'Диалог не найден.' } });
+       return;
+     }
+@@ -1084,12 +1151,49 @@ async function startServer() {
+     }
+     const convId = Number(req.params.id);
+     const conv = previewConversations.get(convId);
+-    if (!conv || conv.user_id !== userRecord.id) {
++    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
+       res.status(404).json({ error: { message: 'Диалог не найден.' } });
+       return;
+     }
+-    if (typeof req.body?.title === 'string' && req.body.title.trim()) {
+-      conv.title = req.body.title.trim();
++    const { title, archived, deleted } = req.body ?? {};
++    if (title === undefined && archived === undefined && deleted === undefined) {
++      res.status(400).json({ error: { message: 'Не переданы поля для обновления.' } });
++      return;
++    }
++    if (archived === true && conv.deleted_at && deleted !== false) {
++      res.status(409).json({
++        error: { message: 'Нельзя архивировать удалённый диалог. Сначала восстановите его.' },
++      });
++      return;
++    }
++    if (typeof title === 'string' && title.trim()) {
++      conv.title = title.trim();
++    }
++    if (typeof archived === 'boolean') {
++      conv.archived_at = archived ? conv.archived_at || new Date().toISOString() : null;
++    }
++    if (typeof deleted === 'boolean') {
++      conv.deleted_at = deleted ? conv.deleted_at || new Date().toISOString() : null;
++    }
++    res.status(200).json(conv);
++  });
++
++  app.post('/api/v1/conversations/:id/restore', (req: Request, res: Response) => {
++    const userRecord = getPreviewSessionUser(req);
++    if (!userRecord) {
++      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
++      return;
++    }
++    const convId = Number(req.params.id);
++    const conv = previewConversations.get(convId);
++    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
++      res.status(404).json({ error: { message: 'Диалог не найден.' } });
++      return;
++    }
++    if (req.body?.fromArchive) {
++      conv.archived_at = null;
++    } else {
++      conv.deleted_at = null;
+     }
+     res.status(200).json(conv);
+   });
+@@ -1102,10 +1206,18 @@ async function startServer() {
+     }
+     const convId = Number(req.params.id);
+     const conv = previewConversations.get(convId);
+-    if (conv && conv.user_id === userRecord.id) {
++    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
++      res.status(404).json({ error: { message: 'Диалог не найден.' } });
++      return;
++    }
++    const isPermanent = req.query.permanent === 'true' || req.query.permanent === '1';
++    if (isPermanent) {
+       previewConversations.delete(convId);
++      res.status(204).end();
++      return;
+     }
+-    res.status(204).end();
++    conv.deleted_at = conv.deleted_at || new Date().toISOString();
++    res.status(200).json(conv);
+   });
+ 
+   app.get('/api/v1/messages', (req: Request, res: Response) => {
+@@ -1139,6 +1251,14 @@ async function startServer() {
+       return;
+     }
+ 
++    const existingConv = previewConversations.get(convId);
++    if (existingConv && existingConv.deleted_at) {
++      res.status(409).json({
++        error: { message: 'Нельзя отправлять сообщения в удалённый диалог. Сначала восстановите его.' },
++      });
++      return;
++    }
++
+     // Check quota before accepting user prompt turn (actual reservation happens in /api/v1/chat/completions)
+     if (role === 'user') {
+       const { daily, monthly } = userRecord.quotas;
+@@ -1172,7 +1292,7 @@ async function startServer() {
+       }
+     }
+ 
+-    let conv = previewConversations.get(convId);
++    let conv = existingConv;
+     const now = new Date().toISOString();
+     if (!conv) {
+       conv = {
+@@ -1181,6 +1301,8 @@ async function startServer() {
+         title: text.slice(0, 60),
+         created_at: now,
+         last_message_at: now,
++        archived_at: null,
++        deleted_at: null,
+         messages: [],
+       };
+       previewConversations.set(conv.id, conv);
+@@ -1196,6 +1318,13 @@ async function startServer() {
+     conv.messages.push(msg);
+     conv.last_message_at = now;
+ 
++    if (role === 'user') {
++      recordPreviewUsageEvent(userRecord, 'message_sent', {
++        conversation_id: conv.id,
++        text_length: text.length,
++      });
++    }
++
+     res.status(201).json(msg);
+   });
+ 
+@@ -1538,6 +1667,13 @@ async function startServer() {
+         }
+ 
+         commitPreviewReservation();
++        recordPreviewUsageEvent(sessionUser, 'model_call', {
++          mode: 'stream',
++          ttft_ms: ttftMs,
++          total_ms: totalMs,
++          chunk_count: chunkCount,
++          reply_length: emittedChars,
++        });
+ 
+         if (!res.writableEnded && !abortController.signal.aborted) {
+           const doneChunk = {
+@@ -1582,6 +1718,10 @@ async function startServer() {
+       const rawReply = await chatWithFreeLlm(trustedMessages, runtimeConfig);
+       const reply = isSecurityRestrictedOutput(rawReply) ? SECURITY_REFUSAL_MESSAGE : rawReply;
+       commitPreviewReservation();
++      recordPreviewUsageEvent(sessionUser, 'model_call', {
++        mode: 'unary',
++        reply_length: reply.length,
++      });
+       res.status(200).json({
+         id: completionId,
+         object: 'chat.completion',
+diff --git a/src/App.tsx b/src/App.tsx
+index 1a4526c..ba00b06 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -29,6 +29,7 @@ import {
+   ThemeMode,
+   WORKSPACE_STORAGE_KEY,
+   applyThemeWithSmoothTransition,
++  archiveSessionInList,
+   canConfigureQuotas,
+   createCustomChatList,
+   deduplicateSessions,
+@@ -37,8 +38,12 @@ import {
+   filterWorkspaceContent,
+   formatTimestampShort,
+   mapBackendConversationToSession,
++  permanentlyDeleteSessionInList,
+   prependPersonalInstructionsToHistory,
++  restoreDeletedSessionInList,
+   serializeWorkspaceState,
++  softDeleteSessionInList,
++  unarchiveSessionInList,
+ } from './utils/dashboardLogic';
+ import {
+   ApiError,
+@@ -142,7 +147,9 @@ export default function App() {
+   const initialDemoActive = hasDemoQueryParam() || Boolean(initialPersisted?.isDemoMode);
+   const initialDemoRole: 'user' | 'admin' =
+     getQueryDemoRole() ?? initialPersisted?.demoRole ?? 'user';
+-  const initialAdminUsers = initialPersisted?.adminUsers ?? DEFAULT_ADMIN_USERS;
++  const initialAdminUsers = initialDemoActive
++    ? (initialPersisted?.adminUsers ?? DEFAULT_ADMIN_USERS)
++    : [];
+ 
+   const [theme, setTheme] = useState<ThemeMode>(() => initialPersisted?.theme ?? 'light');
+   const [authChecked, setAuthChecked] = useState<boolean>(() => initialDemoActive);
+@@ -168,19 +175,22 @@ export default function App() {
+     return savedNav;
+   });
+   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(
+-    () => initialPersisted?.activeCategoryId ?? null
++    () => (initialDemoActive ? (initialPersisted?.activeCategoryId ?? null) : null)
+   );
+   const [chatLists, setChatLists] = useState<ChatListCategory[]>(
+     () => initialPersisted?.chatLists ?? INITIAL_CHAT_LISTS
+   );
+   const [sessions, setSessions] = useState<ChatSession[]>(() => {
++    if (!initialDemoActive) {
++      return [];
++    }
+     if (initialPersisted?.sessions && initialPersisted.sessions.length > 0) {
+       return deduplicateSessions(initialPersisted.sessions);
+     }
+-    return initialDemoActive ? INITIAL_SESSIONS : [];
++    return INITIAL_SESSIONS;
+   });
+   const [activeSessionId, setActiveSessionId] = useState<string | null>(
+-    () => initialPersisted?.activeSessionId ?? null
++    () => (initialDemoActive ? (initialPersisted?.activeSessionId ?? null) : null)
+   );
+ 
+   const [promptValue, setPromptValue] = useState('');
+@@ -251,12 +261,12 @@ export default function App() {
+         theme,
+         isDemoMode,
+         demoRole,
+-        sessions,
+-        activeSessionId,
++        sessions: isDemoMode ? sessions : [],
++        activeSessionId: isDemoMode ? activeSessionId : null,
+         activeNav,
+-        activeCategoryId,
++        activeCategoryId: isDemoMode ? activeCategoryId : null,
+         chatLists,
+-        adminUsers,
++        adminUsers: isDemoMode ? adminUsers : [],
+         modelParams,
+         personalInstructions,
+         profileDisplayName,
+@@ -326,16 +336,13 @@ export default function App() {
+   const loadConversations = useCallback(async () => {
+     if (isDemoMode) return;
+     try {
+-      const list = await conversationsApi.list();
++      const list = await conversationsApi.list('all');
+       for (const conv of list) {
+         if (Array.isArray(conv.messages)) {
+           hydratedConversationIdsRef.current.add(conv.id);
+         }
+       }
+       setSessions((prev) => {
+-        if (list.length === 0) {
+-          return deduplicateSessions(prev);
+-        }
+         const prevById = new Map(prev.map((s) => [s.id, s]));
+         const mappedFromBackend = list.map((conv) => {
+           const existing = prevById.get(`conv-${conv.id}`);
+@@ -345,9 +352,12 @@ export default function App() {
+             existing
+           );
+         });
+-        const backendIds = new Set(mappedFromBackend.map((s) => s.id));
+-        const localOnly = prev.filter((s) => !backendIds.has(s.id));
+-        return deduplicateSessions([...mappedFromBackend, ...localOnly]);
++        return deduplicateSessions(mappedFromBackend);
++      });
++      setActiveSessionId((prevActive) => {
++        if (!prevActive) return null;
++        const match = list.find((conv) => `conv-${conv.id}` === prevActive);
++        return match && !match.deleted_at ? prevActive : null;
+       });
+     } catch (err) {
+       if (err instanceof ApiError && err.status === 401) {
+@@ -395,8 +405,11 @@ export default function App() {
+     const res = await authApi.login(email, password);
+     hydratedConversationIdsRef.current.clear();
+     setIsDemoMode(false);
++    setAdminUsers([]);
++    setSessions([]);
+     setUser(res.user);
+     setActiveSessionId(null);
++    setActiveCategoryId(null);
+     setActiveNav('chats');
+     if (res.user.quotas) {
+       setBackendQuotas(res.user.quotas);
+@@ -434,19 +447,26 @@ export default function App() {
+     hydratedConversationIdsRef.current.clear();
+     setIsDemoMode(false);
+     setUser(null);
++    setAdminUsers([]);
++    setSessions([]);
+     setBackendQuotas(null);
+     setActiveSessionId(null);
++    setActiveCategoryId(null);
+     setStreamError(null);
+   }, [isDemoMode]);
+ 
+   const handleSelectSession = useCallback(async (sessionId: string) => {
++    const target = sessions.find((s) => s.id === sessionId);
++    if (target?.deletedAt) return;
++
+     setActiveSessionId(sessionId);
+     setActiveNav('chats');
++    if (!target?.archivedAt) {
++      setActiveCategoryId(null);
++    }
+     setStreamError(null);
+ 
+     if (isDemoMode) return;
+-
+-    const target = sessions.find((s) => s.id === sessionId);
+     const convId =
+       target?.conversationId ??
+       (sessionId.startsWith('conv-') ? parseInt(sessionId.slice(5), 10) : NaN);
+@@ -506,19 +526,81 @@ export default function App() {
+     }
+   }, [isDemoMode, sessions, loadConversations]);
+ 
++  const handleArchiveSession = useCallback(async (sessionId: string) => {
++    const target = sessions.find((s) => s.id === sessionId);
++    setSessions((prev) => archiveSessionInList(prev, sessionId));
++    setActiveSessionId((prev) => (prev === sessionId ? null : prev));
++
++    if (isDemoMode) return;
++
++    if (target?.conversationId) {
++      try {
++        await conversationsApi.archive(target.conversationId, true);
++      } catch {
++        loadConversations();
++      }
++    }
++  }, [isDemoMode, sessions, loadConversations]);
++
++  const handleUnarchiveSession = useCallback(async (sessionId: string) => {
++    const target = sessions.find((s) => s.id === sessionId);
++    setSessions((prev) => unarchiveSessionInList(prev, sessionId));
++
++    if (isDemoMode) return;
++
++    if (target?.conversationId) {
++      try {
++        await conversationsApi.archive(target.conversationId, false);
++      } catch {
++        loadConversations();
++      }
++    }
++  }, [isDemoMode, sessions, loadConversations]);
++
+   const handleDeleteSession = useCallback(async (sessionId: string) => {
++    const target = sessions.find((s) => s.id === sessionId);
++    setSessions((prev) => softDeleteSessionInList(prev, sessionId));
++    setActiveSessionId((prev) => (prev === sessionId ? null : prev));
++
++    if (isDemoMode) return;
++
++    if (target?.conversationId) {
++      try {
++        await conversationsApi.delete(target.conversationId, false);
++      } catch {
++        loadConversations();
++      }
++    }
++  }, [isDemoMode, sessions, loadConversations]);
++
++  const handleRestoreDeletedSession = useCallback(async (sessionId: string) => {
++    const target = sessions.find((s) => s.id === sessionId);
++    setSessions((prev) => restoreDeletedSessionInList(prev, sessionId));
++
++    if (isDemoMode) return;
++
++    if (target?.conversationId) {
++      try {
++        await conversationsApi.restore(target.conversationId);
++      } catch {
++        loadConversations();
++      }
++    }
++  }, [isDemoMode, sessions, loadConversations]);
++
++  const handlePermanentDeleteSession = useCallback(async (sessionId: string) => {
+     const target = sessions.find((s) => s.id === sessionId);
+     if (target?.conversationId) {
+       hydratedConversationIdsRef.current.delete(target.conversationId);
+     }
+-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
++    setSessions((prev) => permanentlyDeleteSessionInList(prev, sessionId));
+     setActiveSessionId((prev) => (prev === sessionId ? null : prev));
+ 
+     if (isDemoMode) return;
+ 
+     if (target?.conversationId) {
+       try {
+-        await conversationsApi.delete(target.conversationId);
++        await conversationsApi.delete(target.conversationId, true);
+       } catch {
+         loadConversations();
+       }
+@@ -802,9 +884,13 @@ export default function App() {
+         convId = createdConv.id;
+         hydratedConversationIdsRef.current.add(convId);
+         currentSession = mapBackendConversationToSession(createdConv, []);
+-        currentSession.categoryId = activeCategoryId ?? 'code';
++        currentSession.categoryId =
++          activeCategoryId && activeCategoryId !== 'archive' && activeCategoryId !== 'deleted'
++            ? activeCategoryId
++            : 'code';
+         setSessions((prev) => deduplicateSessions([currentSession!, ...prev]));
+         setActiveSessionId(currentSession.id);
++        setActiveCategoryId(null);
+       }
+ 
+       const targetSessionId = currentSession.id;
+@@ -1141,6 +1227,7 @@ export default function App() {
+           activeSessionId={activeSessionId}
+           onSelectSession={handleSelectSession}
+           onRenameSession={handleRenameSession}
++          onArchiveSession={handleArchiveSession}
+           onDeleteSession={handleDeleteSession}
+           user={user}
+           quotas={quotas}
+@@ -1236,6 +1323,9 @@ export default function App() {
+                 onEditUserPrompt={handleEditUserPrompt}
+                 quotaBlockStatus={quotaBlockStatus}
+                 onOpenQuotasView={handleOpenQuotasView}
++                onArchiveSession={handleArchiveSession}
++                onUnarchiveSession={handleUnarchiveSession}
++                onDeleteSession={handleDeleteSession}
+               />
+             ) : (
+               <Suspense
+@@ -1247,6 +1337,7 @@ export default function App() {
+               >
+                 <WorkspaceSectionView
+                   activeNav={activeNav}
++                  activeCategoryId={activeCategoryId}
+                   activeCategoryLabel={activeCategory?.label ?? null}
+                   sessions={filteredContent.sessions}
+                   projects={INITIAL_PROJECTS}
+@@ -1255,6 +1346,11 @@ export default function App() {
+                   onOpenSession={(sess) => {
+                     handleSelectSession(sess.id);
+                   }}
++                  onArchiveSession={handleArchiveSession}
++                  onUnarchiveSession={handleUnarchiveSession}
++                  onDeleteSession={handleDeleteSession}
++                  onRestoreDeletedSession={handleRestoreDeletedSession}
++                  onPermanentDeleteSession={handlePermanentDeleteSession}
+                   onUseTemplate={(tplText) => {
+                     setPromptValue(tplText);
+                     setActiveSessionId(null);
+@@ -1266,7 +1362,7 @@ export default function App() {
+                   isDemoMode={isDemoMode}
+                   user={user}
+                   quotas={quotas}
+-                  persistedAdminUsers={adminUsers}
++                  persistedAdminUsers={isDemoMode ? adminUsers : []}
+                   onUpdateAdminUsers={(updatedUsers) => {
+                     setAdminUsers(updatedUsers);
+                   }}
+diff --git a/src/components/ChatThreadView.tsx b/src/components/ChatThreadView.tsx
+index 56efcb3..9b4f140 100644
+--- a/src/components/ChatThreadView.tsx
++++ b/src/components/ChatThreadView.tsx
+@@ -13,6 +13,9 @@ import {
+   ThumbsDown,
+   Pencil,
+   ArrowDown,
++  Archive,
++  ArchiveRestore,
++  Trash2,
+ } from 'lucide-react';
+ import {
+   ChatMessage,
+@@ -47,6 +50,9 @@ interface ChatThreadViewProps {
+   onEditUserPrompt?: (messageId: string, content: string) => void;
+   quotaBlockStatus?: QuotaBlockStatus | null;
+   onOpenQuotasView?: () => void;
++  onArchiveSession?: (sessionId: string) => Promise<void> | void;
++  onUnarchiveSession?: (sessionId: string) => Promise<void> | void;
++  onDeleteSession?: (sessionId: string) => Promise<void> | void;
+ }
+ 
+ interface ChatMessageRowProps {
+@@ -382,6 +388,9 @@ export const ChatThreadView = React.memo<ChatThreadViewProps>(({
+   onEditUserPrompt,
+   quotaBlockStatus = null,
+   onOpenQuotasView,
++  onArchiveSession,
++  onUnarchiveSession,
++  onDeleteSession,
+ }) => {
+   const [copiedId, setCopiedId] = useState<string | null>(null);
+   const [speakingId, setSpeakingId] = useState<string | null>(null);
+@@ -584,6 +593,46 @@ export const ChatThreadView = React.memo<ChatThreadViewProps>(({
+                 aria-hidden="true"
+               />
+             </button>
++
++            {!session.deletedAt && (
++              <>
++                {session.archivedAt
++                  ? onUnarchiveSession && (
++                      <button
++                        type="button"
++                        onClick={() => onUnarchiveSession(session.id)}
++                        aria-label="Восстановить из архива"
++                        title="Восстановить из архива"
++                        className="focus-ring px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-700/80 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300 text-[12px] font-medium flex items-center gap-1.5 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 transition-colors"
++                      >
++                        <ArchiveRestore className="w-3.5 h-3.5" aria-hidden="true" />
++                        <span className="hidden sm:inline">Из архива</span>
++                      </button>
++                    )
++                  : onArchiveSession && (
++                      <button
++                        type="button"
++                        onClick={() => onArchiveSession(session.id)}
++                        aria-label="Переместить чат в архив"
++                        title="В архив"
++                        className="focus-ring p-1.5 rounded-lg border border-slate-200 dark:border-slate-700/80 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
++                      >
++                        <Archive className="w-4 h-4" aria-hidden="true" />
++                      </button>
++                    )}
++                {onDeleteSession && (
++                  <button
++                    type="button"
++                    onClick={() => onDeleteSession(session.id)}
++                    aria-label="Удалить чат в корзину"
++                    title="Удалить"
++                    className="focus-ring p-1.5 rounded-lg border border-slate-200 dark:border-slate-700/80 text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors"
++                  >
++                    <Trash2 className="w-4 h-4" aria-hidden="true" />
++                  </button>
++                )}
++              </>
++            )}
+           </div>
+         </div>
+       </div>
+diff --git a/src/components/Sidebar.tsx b/src/components/Sidebar.tsx
+index 0015ce1..925cf6f 100644
+--- a/src/components/Sidebar.tsx
++++ b/src/components/Sidebar.tsx
+@@ -1,4 +1,4 @@
+-import React, { useState } from 'react';
++import React, { useMemo, useState } from 'react';
+ import {
+   Search,
+   Folder,
+@@ -16,6 +16,7 @@ import {
+   Pencil,
+   Trash2,
+   MessageSquare,
++  Archive,
+ } from 'lucide-react';
+ import { ArsLogo } from './ArsLogo';
+ import {
+@@ -23,7 +24,9 @@ import {
+   ChatSession,
+   NavSectionId,
+   canConfigureQuotas,
++  computeChatListCategories,
+   deduplicateSessions,
++  getSessionsForCategory,
+ } from '../utils/dashboardLogic';
+ import { QuotaLimits, UserProfile } from '../services/api';
+ 
+@@ -38,6 +41,7 @@ interface SidebarProps {
+   activeSessionId?: string | null;
+   onSelectSession?: (sessionId: string) => void;
+   onRenameSession?: (sessionId: string, newTitle: string) => Promise<void> | void;
++  onArchiveSession?: (sessionId: string) => Promise<void> | void;
+   onDeleteSession?: (sessionId: string) => Promise<void> | void;
+   user?: UserProfile | null;
+   quotas?: QuotaLimits | null;
+@@ -77,6 +81,7 @@ export const Sidebar = React.memo<SidebarProps>(({
+   activeSessionId = null,
+   onSelectSession,
+   onRenameSession,
++  onArchiveSession,
+   onDeleteSession,
+   user = null,
+   quotas = null,
+@@ -105,6 +110,14 @@ export const Sidebar = React.memo<SidebarProps>(({
+   const visibleNavItems = BASE_NAV_ITEMS.filter(
+     (item) => !item.adminOnly || isAdmin
+   );
++  const computedChatLists = useMemo(
++    () => computeChatListCategories(chatLists, sessions),
++    [chatLists, sessions]
++  );
++  const activeSessions = useMemo(
++    () => getSessionsForCategory(sessions, null),
++    [sessions]
++  );
+ 
+   const handleCreateListSubmit = (e: React.FormEvent) => {
+     e.preventDefault();
+@@ -269,8 +282,8 @@ export const Sidebar = React.memo<SidebarProps>(({
+           </div>
+         )}
+ 
+-        {chatLists.map((list) => {
+-          const isSelected = activeCategoryId === list.id;
++        {computedChatLists.map((list) => {
++          const isSelected = activeCategoryId === list.id && !activeSessionId;
+           return (
+             <button
+               key={list.id}
+@@ -281,6 +294,7 @@ export const Sidebar = React.memo<SidebarProps>(({
+                 onCloseMobile();
+               }}
+               aria-pressed={isSelected}
++              data-testid={`chat-list-item-${list.id}`}
+               className={`focus-ring w-full flex items-center ${
+                 collapsed ? 'justify-center px-0' : 'justify-between px-3'
+               } h-[34px] rounded-xl text-[13px] transition-colors whitespace-nowrap ${
+@@ -304,8 +318,15 @@ export const Sidebar = React.memo<SidebarProps>(({
+                 )}
+                 {!collapsed && <span className="truncate">{list.label}</span>}
+               </span>
+-              {!collapsed && isSelected && (
+-                <span className="text-[11px] text-[#4F46E5] dark:text-indigo-300 tabular-nums">
++              {!collapsed && (
++                <span
++                  data-testid={`chat-list-count-${list.id}`}
++                  className={`text-[11px] tabular-nums ${
++                    isSelected
++                      ? 'text-[#4F46E5] dark:text-indigo-300 font-semibold'
++                      : 'text-[#6B7280] dark:text-slate-400'
++                  }`}
++                >
+                   {list.count}
+                 </span>
+               )}
+@@ -392,13 +413,13 @@ export const Sidebar = React.memo<SidebarProps>(({
+           </form>
+         )}
+ 
+-        {/* Recent Conversations Section */}
+-        {!collapsed && sessions.length > 0 && onSelectSession && (
++        {/* Recent Conversations Section (active chats only) */}
++        {!collapsed && activeSessions.length > 0 && onSelectSession && (
+           <div className="pt-2.5 space-y-0.5">
+             <div className="px-3 pb-1 text-[11px] font-semibold tracking-wider text-[#6B7280] dark:text-slate-400 uppercase">
+               НЕДАВНИЕ ДИАЛОГИ
+             </div>
+-            {deduplicateSessions(sessions).slice(0, 8).map((sess) => {
++            {deduplicateSessions(activeSessions).slice(0, 8).map((sess) => {
+               const isCurrent = activeSessionId === sess.id;
+               const isEditing = editingSessionId === sess.id;
+ 
+@@ -461,7 +482,7 @@ export const Sidebar = React.memo<SidebarProps>(({
+                     <span className="truncate">{sess.title}</span>
+                   </button>
+ 
+-                  {(onRenameSession || onDeleteSession) && (
++                  {(onRenameSession || onArchiveSession || onDeleteSession) && (
+                     <div className="hidden group-hover:flex focus-within:flex items-center gap-0.5 shrink-0 ml-1">
+                       {onRenameSession && (
+                         <button
+@@ -473,11 +494,23 @@ export const Sidebar = React.memo<SidebarProps>(({
+                           <Pencil className="w-3 h-3" />
+                         </button>
+                       )}
++                      {onArchiveSession && (
++                        <button
++                          type="button"
++                          onClick={() => onArchiveSession(sess.id)}
++                          aria-label={`В архив «${sess.title}»`}
++                          title="В архив"
++                          className="focus-ring p-1 rounded text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
++                        >
++                          <Archive className="w-3 h-3" />
++                        </button>
++                      )}
+                       {onDeleteSession && (
+                         <button
+                           type="button"
+                           onClick={() => onDeleteSession(sess.id)}
+                           aria-label={`Удалить диалог «${sess.title}»`}
++                          title="Удалить"
+                           className="focus-ring p-1 rounded text-slate-400 hover:text-red-600 dark:hover:text-red-400"
+                         >
+                           <Trash2 className="w-3 h-3" />
+diff --git a/src/components/WorkspaceModalsAndViews.tsx b/src/components/WorkspaceModalsAndViews.tsx
+index a9d6ae8..0d363f1 100644
+--- a/src/components/WorkspaceModalsAndViews.tsx
++++ b/src/components/WorkspaceModalsAndViews.tsx
+@@ -14,6 +14,11 @@ import {
+   Lock,
+   User,
+   Check,
++  Archive,
++  ArchiveRestore,
++  RotateCcw,
++  Trash2,
++  AlertCircle,
+ } from 'lucide-react';
+ import {
+   ChatSession,
+@@ -26,6 +31,7 @@ import {
+   applyQuotaLimitChange,
+   canConfigureQuotas,
+   deduplicateSessions,
++  getInitialAdminPanelState,
+   validateModelParameters,
+   validateProfileUpdate,
+ } from '../utils/dashboardLogic';
+@@ -40,12 +46,18 @@ import {
+ 
+ interface SecondaryViewProps {
+   activeNav: NavSectionId;
++  activeCategoryId?: string | null;
+   activeCategoryLabel: string | null;
+   sessions: ChatSession[];
+   projects: ProjectItem[];
+   templates: PromptTemplate[];
+   documents: DocumentItem[];
+   onOpenSession: (session: ChatSession) => void;
++  onArchiveSession?: (sessionId: string) => Promise<void> | void;
++  onUnarchiveSession?: (sessionId: string) => Promise<void> | void;
++  onDeleteSession?: (sessionId: string) => Promise<void> | void;
++  onRestoreDeletedSession?: (sessionId: string) => Promise<void> | void;
++  onPermanentDeleteSession?: (sessionId: string) => Promise<void> | void;
+   onUseTemplate: (promptText: string) => void;
+   onResetToNewChat: () => void;
+   isDemoMode?: boolean;
+@@ -83,25 +95,37 @@ const DEMO_ADMIN_USAGE: AdminUsageResponse = {
+ 
+ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+   activeNav,
++  activeCategoryId = null,
+   activeCategoryLabel,
+   sessions,
+   projects,
+   templates,
+   documents,
+   onOpenSession,
++  onArchiveSession,
++  onUnarchiveSession,
++  onDeleteSession,
++  onRestoreDeletedSession,
++  onPermanentDeleteSession,
+   onUseTemplate,
+   onResetToNewChat,
+   isDemoMode = false,
+   user = null,
+   quotas = null,
+-  persistedAdminUsers = DEFAULT_ADMIN_USERS,
++  persistedAdminUsers = [],
+   onUpdateAdminUsers,
+   streamDiagnostics = [],
+ }) => {
+   const isAdmin = canConfigureQuotas(user);
+-  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>(persistedAdminUsers);
+-  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(DEMO_ADMIN_USAGE);
+-  const [adminLoading, setAdminLoading] = useState(false);
++  const initialAdminState = getInitialAdminPanelState({
++    isDemoMode,
++    persistedAdminUsers,
++    demoUsage: DEMO_ADMIN_USAGE,
++  });
++  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>(initialAdminState.users);
++  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(initialAdminState.usage);
++  const [adminLoaded, setAdminLoaded] = useState<boolean>(initialAdminState.loaded);
++  const [adminLoading, setAdminLoading] = useState(!isDemoMode && activeNav === 'admin' && isAdmin);
+   const [adminError, setAdminError] = useState<string | null>(null);
+   const [quotaDrafts, setQuotaDrafts] = useState<
+     Record<number, { daily: string; monthly: string }>
+@@ -130,6 +154,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+           : DEFAULT_ADMIN_USERS;
+       setAdminUsers(sourceUsers);
+       setAdminUsage(DEMO_ADMIN_USAGE);
++      setAdminLoaded(true);
+       syncDraftsFromUsers(sourceUsers);
+       setAdminLoading(false);
+       return;
+@@ -142,6 +167,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+       ]);
+       setAdminUsers(usersRes.users);
+       setAdminUsage(usageRes);
++      setAdminLoaded(true);
+       syncDraftsFromUsers(usersRes.users);
+     } catch (err) {
+       setAdminError(
+@@ -153,6 +179,12 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+   };
+ 
+   useEffect(() => {
++    if (!isDemoMode) {
++      setAdminUsers([]);
++      setAdminUsage(null);
++      setAdminLoaded(false);
++      setQuotaDrafts({});
++    }
+     if (activeNav === 'admin' && isAdmin) {
+       loadAdminData();
+     }
+@@ -161,6 +193,8 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+   useEffect(() => {
+     if (isDemoMode && persistedAdminUsers && persistedAdminUsers.length > 0) {
+       setAdminUsers(persistedAdminUsers);
++      setAdminUsage(DEMO_ADMIN_USAGE);
++      setAdminLoaded(true);
+       syncDraftsFromUsers(persistedAdminUsers);
+     }
+   }, [isDemoMode, persistedAdminUsers]);
+@@ -214,9 +248,38 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+ 
+   // Read-only quota view for regular users (or if non-admin navigates to 'admin' or 'quotas')
+   if (activeNav === 'quotas' || (activeNav === 'admin' && !isAdmin)) {
++    if (!quotas && !isDemoMode) {
++      return (
++        <section
++          aria-label="Мои квоты запросов"
++          className="max-w-[920px] mx-auto w-full px-6 py-8 space-y-6"
++        >
++          <div className="flex flex-wrap items-center justify-between gap-4">
++            <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
++              <Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
++              <span>Мои квоты и лимиты запросов</span>
++            </h2>
++            <button
++              type="button"
++              onClick={onResetToNewChat}
++              className="focus-ring px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
++            >
++              К новому чату
++            </button>
++          </div>
++          <div
++            role="status"
++            className="p-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] text-[13.5px] text-slate-600 dark:text-slate-300"
++          >
++            Загрузка актуальных квот учётной записи...
++          </div>
++        </section>
++      );
++    }
++
+     const effectiveQuotas: QuotaLimits = quotas ?? {
+-      daily: { used: 4, limit: 20 },
+-      monthly: { used: 38, limit: 500 },
++      daily: { used: 0, limit: null },
++      monthly: { used: 0, limit: null },
+     };
+     const dailyLimit =
+       typeof effectiveQuotas.daily.limit === 'number' && effectiveQuotas.daily.limit >= 0
+@@ -379,9 +442,20 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+         {adminError && (
+           <div
+             role="alert"
+-            className="p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300"
++            className="p-4 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300 flex flex-wrap items-center justify-between gap-3"
+           >
+-            {adminError}
++            <div className="flex items-center gap-2">
++              <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
++              <span>{adminError}</span>
++            </div>
++            <button
++              type="button"
++              onClick={loadAdminData}
++              disabled={adminLoading}
++              className="focus-ring px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[12px] font-semibold"
++            >
++              Повторить попытку
++            </button>
+           </div>
+         )}
+ 
+@@ -394,8 +468,25 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+           </div>
+         )}
+ 
+-        {/* Usage Summary Cards */}
+-        {adminUsage && (
++        {/* Loading State (prevents flashing mock/hardcoded numbers before real API data arrives) */}
++        {!isDemoMode && adminLoading && !adminLoaded && (
++          <div
++            role="status"
++            aria-live="polite"
++            className="p-8 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] flex flex-col items-center justify-center gap-3 text-center"
++          >
++            <RefreshCw className="w-6 h-6 text-indigo-600 dark:text-indigo-400 animate-spin" aria-hidden="true" />
++            <div className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
++              Загрузка статистики и квот пользователей...
++            </div>
++            <p className="text-[12.5px] text-slate-500 dark:text-slate-400">
++              Получаем актуальные данные из базы PostgreSQL.
++            </p>
++          </div>
++        )}
++
++        {/* Usage Summary Cards (rendered only after real data loads or in demo mode) */}
++        {(isDemoMode || adminLoaded) && adminUsage && (
+           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+             <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]">
+               <div className="text-[12px] text-slate-500 dark:text-slate-400">Пользователей в системе</div>
+@@ -403,104 +494,128 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+                 {adminUsers.length}
+               </div>
+             </div>
+-            {adminUsage.summary.slice(0, 2).map((item) => (
+-              <div
+-                key={item.event_type}
+-                className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]"
+-              >
+-                <div className="text-[12px] text-slate-500 dark:text-slate-400">
+-                  Событие: <span className="font-mono">{item.event_type}</span> (30 дн.)
++            {adminUsage.summary.length > 0 ? (
++              adminUsage.summary.slice(0, 2).map((item) => (
++                <div
++                  key={item.event_type}
++                  className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]"
++                >
++                  <div className="text-[12px] text-slate-500 dark:text-slate-400">
++                    Событие: <span className="font-mono">{item.event_type}</span> (30 дн.)
++                  </div>
++                  <div className="text-[22px] font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
++                    {item.count}
++                  </div>
+                 </div>
+-                <div className="text-[22px] font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
+-                  {item.count}
++              ))
++            ) : (
++              <div className="sm:col-span-2 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] flex items-center justify-between">
++                <div>
++                  <div className="text-[12px] text-slate-500 dark:text-slate-400">
++                    События использования (30 дн.)
++                  </div>
++                  <div className="text-[14px] font-semibold text-slate-800 dark:text-slate-200 mt-1">
++                    За последние 30 дней событий пока не зафиксировано
++                  </div>
+                 </div>
++                <span className="text-[22px] font-bold text-slate-900 dark:text-white tabular-nums">0</span>
+               </div>
+-            ))}
++            )}
+           </div>
+         )}
+ 
+-        {/* Users & Quotas Table */}
+-        <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
+-          <table className="w-full text-left border-collapse">
+-            <thead>
+-              <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
+-                <th className="py-3 px-4">Пользователь</th>
+-                <th className="py-3 px-4">Роль</th>
+-                <th className="py-3 px-4">Дневной лимит (исп. / лимит)</th>
+-                <th className="py-3 px-4">Месячный лимит (исп. / лимит)</th>
+-                <th className="py-3 px-4 text-right">Действие</th>
+-              </tr>
+-            </thead>
+-            <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
+-              {adminUsers.map((u) => {
+-                const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
+-                return (
+-                  <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+-                    <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
+-                      {u.email}
+-                    </td>
+-                    <td className="py-3.5 px-4 text-[13px] text-slate-600 dark:text-slate-300">
+-                      {u.role === 'admin' ? 'Администратор' : 'Сотрудник'}
+-                    </td>
+-                    <td className="py-3.5 px-4 tabular-nums">
+-                      <div className="flex items-center gap-2">
+-                        <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
+-                          {u.quotas.daily.used} /
+-                        </span>
+-                        <input
+-                          type="number"
+-                          min="0"
+-                          aria-label={`Дневной лимит для ${u.email}`}
+-                          value={draft.daily}
+-                          onChange={(e) =>
+-                            setQuotaDrafts((prev) => ({
+-                              ...prev,
+-                              [u.id]: { ...draft, daily: e.target.value },
+-                            }))
+-                          }
+-                          placeholder="Без лимита"
+-                          className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+-                        />
+-                      </div>
+-                    </td>
+-                    <td className="py-3.5 px-4 tabular-nums">
+-                      <div className="flex items-center gap-2">
+-                        <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
+-                          {u.quotas.monthly.used} /
+-                        </span>
+-                        <input
+-                          type="number"
+-                          min="0"
+-                          aria-label={`Месячный лимит для ${u.email}`}
+-                          value={draft.monthly}
+-                          onChange={(e) =>
+-                            setQuotaDrafts((prev) => ({
+-                              ...prev,
+-                              [u.id]: { ...draft, monthly: e.target.value },
+-                            }))
+-                          }
+-                          placeholder="Без лимита"
+-                          className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+-                        />
+-                      </div>
+-                    </td>
+-                    <td className="py-3.5 px-4 text-right">
+-                      <button
+-                        type="button"
+-                        onClick={() => handleSaveUserQuota(u.id)}
+-                        aria-label={`Сохранить квоты для ${u.email}`}
+-                        className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12.5px] font-semibold"
+-                      >
+-                        <Save className="w-3.5 h-3.5" aria-hidden="true" />
+-                        <span>Сохранить</span>
+-                      </button>
++        {/* Users & Quotas Table (rendered only after real data loads or in demo mode) */}
++        {(isDemoMode || adminLoaded) && (
++          <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
++            <table className="w-full text-left border-collapse">
++              <thead>
++                <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
++                  <th className="py-3 px-4">Пользователь</th>
++                  <th className="py-3 px-4">Роль</th>
++                  <th className="py-3 px-4">Дневной лимит (исп. / лимит)</th>
++                  <th className="py-3 px-4">Месячный лимит (исп. / лимит)</th>
++                  <th className="py-3 px-4 text-right">Действие</th>
++                </tr>
++              </thead>
++              <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
++                {adminUsers.length === 0 ? (
++                  <tr>
++                    <td colSpan={5} className="py-6 px-4 text-center text-[13px] text-slate-500 dark:text-slate-400">
++                      Пользователи в системе не найдены.
+                     </td>
+                   </tr>
+-                );
+-              })}
+-            </tbody>
+-          </table>
+-        </div>
++                ) : (
++                  adminUsers.map((u) => {
++                    const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
++                    return (
++                      <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
++                        <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
++                          {u.email}
++                        </td>
++                        <td className="py-3.5 px-4 text-[13px] text-slate-600 dark:text-slate-300">
++                          {u.role === 'admin' ? 'Администратор' : 'Сотрудник'}
++                        </td>
++                        <td className="py-3.5 px-4 tabular-nums">
++                          <div className="flex items-center gap-2">
++                            <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
++                              {u.quotas.daily.used} /
++                            </span>
++                            <input
++                              type="number"
++                              min="0"
++                              aria-label={`Дневной лимит для ${u.email}`}
++                              value={draft.daily}
++                              onChange={(e) =>
++                                setQuotaDrafts((prev) => ({
++                                  ...prev,
++                                  [u.id]: { ...draft, daily: e.target.value },
++                                }))
++                              }
++                              placeholder="Без лимита"
++                              className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
++                            />
++                          </div>
++                        </td>
++                        <td className="py-3.5 px-4 tabular-nums">
++                          <div className="flex items-center gap-2">
++                            <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
++                              {u.quotas.monthly.used} /
++                            </span>
++                            <input
++                              type="number"
++                              min="0"
++                              aria-label={`Месячный лимит для ${u.email}`}
++                              value={draft.monthly}
++                              onChange={(e) =>
++                                setQuotaDrafts((prev) => ({
++                                  ...prev,
++                                  [u.id]: { ...draft, monthly: e.target.value },
++                                }))
++                              }
++                              placeholder="Без лимита"
++                              className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
++                            />
++                          </div>
++                        </td>
++                        <td className="py-3.5 px-4 text-right">
++                          <button
++                            type="button"
++                            onClick={() => handleSaveUserQuota(u.id)}
++                            aria-label={`Сохранить квоты для ${u.email}`}
++                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12.5px] font-semibold"
++                          >
++                            <Save className="w-3.5 h-3.5" aria-hidden="true" />
++                            <span>Сохранить</span>
++                          </button>
++                        </td>
++                      </tr>
++                    );
++                  })
++                )}
++              </tbody>
++            </table>
++          </div>
++        )}
+ 
+         {/* Protected Admin Streaming Diagnostics (numeric metrics only: no prompts, replies, or keys) */}
+         {(() => {
+@@ -796,18 +911,34 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+   }
+ 
+   // History or Category filtered sessions view
++  const displayedSessions = deduplicateSessions(sessions);
++  const isArchiveView = activeCategoryId === 'archive';
++  const isDeletedView = activeCategoryId === 'deleted';
++
+   return (
+     <section
+       aria-label={activeCategoryLabel ? `Список: ${activeCategoryLabel}` : 'История чатов'}
+       className="max-w-[920px] mx-auto w-full px-6 py-8"
+     >
+-      <div className="flex items-center justify-between gap-4 mb-6">
++      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
+         <div>
+-          <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100">
+-            {activeCategoryLabel ? `Список чатов: ${activeCategoryLabel}` : 'История диалогов'}
++          <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
++            <span>
++              {activeCategoryLabel ? `Список чатов: ${activeCategoryLabel}` : 'История диалогов'}
++            </span>
++            <span
++              data-testid="section-sessions-count"
++              className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-[13px] font-semibold text-slate-700 dark:text-slate-300 tabular-nums"
++            >
++              {displayedSessions.length}
++            </span>
+           </h2>
+           <p className="text-[13.5px] text-slate-600 dark:text-slate-400 mt-1">
+-            Выберите диалог для продолжения работы или начните новый чат.
++            {isDeletedView
++              ? 'Удалённые диалоги можно восстановить в основной список или удалить навсегда.'
++              : isArchiveView
++                ? 'Архивированные диалоги скрыты из основного списка; их можно открыть или вернуть из архива.'
++                : 'Выберите диалог для продолжения работы, архивируйте или начните новый чат.'}
+           </p>
+         </div>
+         <button
+@@ -819,14 +950,22 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+         </button>
+       </div>
+ 
+-      {sessions.length === 0 ? (
++      {displayedSessions.length === 0 ? (
+         <div className="p-8 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] text-center">
+           <Clock className="w-8 h-8 text-slate-400 mx-auto mb-2" aria-hidden="true" />
+           <h3 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">
+-            В этом разделе пока нет диалогов
++            {isDeletedView
++              ? 'Удалённых диалогов нет'
++              : isArchiveView
++                ? 'Архив диалогов пуст'
++                : 'В этом разделе пока нет диалогов'}
+           </h3>
+           <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-1 mb-4">
+-            Создайте новый чат или выберите другой фильтр в боковой панели.
++            {isDeletedView
++              ? 'При удалении чата из рабочего пространства он попадёт в этот раздел.'
++              : isArchiveView
++                ? 'Отправьте любой активный диалог в архив, чтобы он появился здесь.'
++                : 'Создайте новый чат или выберите другой фильтр в боковой панели.'}
+           </p>
+           <button
+             type="button"
+@@ -837,37 +976,112 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
+           </button>
+         </div>
+       ) : (
+-        <div className="space-y-3">
+-          {deduplicateSessions(sessions).map((sess) => (
+-            <div
+-              key={sess.id}
+-              className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 flex items-center justify-between gap-4 transition-colors"
+-            >
+-              <div className="min-w-0">
+-                <div className="flex items-center gap-2">
+-                  {sess.starred && (
+-                    <Star className="w-4 h-4 text-[#F59E0B] fill-[#F59E0B] shrink-0" aria-hidden="true" />
++        <div className="space-y-3" data-testid="section-sessions-list">
++          {displayedSessions.map((sess) => {
++            const sessionIsDeleted = Boolean(sess.deletedAt) || isDeletedView;
++            const sessionIsArchived = !sessionIsDeleted && (Boolean(sess.archivedAt) || isArchiveView);
++
++            return (
++              <div
++                key={sess.id}
++                className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 flex flex-wrap items-center justify-between gap-4 transition-colors"
++              >
++                <div className="min-w-0 flex-1">
++                  <div className="flex items-center gap-2">
++                    {sess.starred && (
++                      <Star className="w-4 h-4 text-[#F59E0B] fill-[#F59E0B] shrink-0" aria-hidden="true" />
++                    )}
++                    <h3 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100 truncate">
++                      {sess.title}
++                    </h3>
++                  </div>
++                  <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mt-1 truncate">
++                    {sess.messages[sess.messages.length - 1]?.content || 'Без сообщений'}
++                  </p>
++                </div>
++
++                <div className="flex flex-wrap items-center gap-2 shrink-0">
++                  <span className="text-[12px] text-slate-400 tabular-nums mr-1">{sess.updatedAt}</span>
++
++                  {sessionIsDeleted ? (
++                    <>
++                      {onRestoreDeletedSession && (
++                        <button
++                          type="button"
++                          onClick={() => onRestoreDeletedSession(sess.id)}
++                          aria-label={`Восстановить диалог «${sess.title}»`}
++                          className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-600 hover:text-white text-[12.5px] font-semibold text-indigo-700 dark:text-indigo-300 transition-colors"
++                        >
++                          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
++                          <span>Восстановить</span>
++                        </button>
++                      )}
++                      {onPermanentDeleteSession && (
++                        <button
++                          type="button"
++                          onClick={() => onPermanentDeleteSession(sess.id)}
++                          aria-label={`Удалить навсегда диалог «${sess.title}»`}
++                          className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-50 dark:bg-red-950/40 hover:bg-red-600 hover:text-white text-[12.5px] font-semibold text-red-700 dark:text-red-300 transition-colors"
++                        >
++                          <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
++                          <span>Удалить навсегда</span>
++                        </button>
++                      )}
++                    </>
++                  ) : (
++                    <>
++                      <button
++                        type="button"
++                        onClick={() => onOpenSession(sess)}
++                        aria-label={`Открыть диалог «${sess.title}»`}
++                        className="focus-ring px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-600 hover:text-white text-[12.5px] font-semibold text-slate-800 dark:text-slate-200 transition-colors"
++                      >
++                        Открыть
++                      </button>
++
++                      {sessionIsArchived ? (
++                        onUnarchiveSession && (
++                          <button
++                            type="button"
++                            onClick={() => onUnarchiveSession(sess.id)}
++                            aria-label={`Восстановить из архива «${sess.title}»`}
++                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-[12.5px] font-medium text-slate-700 dark:text-slate-200 transition-colors"
++                          >
++                            <ArchiveRestore className="w-3.5 h-3.5" aria-hidden="true" />
++                            <span>Восстановить из архива</span>
++                          </button>
++                        )
++                      ) : (
++                        onArchiveSession && (
++                          <button
++                            type="button"
++                            onClick={() => onArchiveSession(sess.id)}
++                            aria-label={`В архив «${sess.title}»`}
++                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[12.5px] font-medium text-slate-700 dark:text-slate-200 transition-colors"
++                          >
++                            <Archive className="w-3.5 h-3.5" aria-hidden="true" />
++                            <span>В архив</span>
++                          </button>
++                        )
++                      )}
++
++                      {onDeleteSession && (
++                        <button
++                          type="button"
++                          onClick={() => onDeleteSession(sess.id)}
++                          aria-label={`Удалить диалог «${sess.title}»`}
++                          className="focus-ring inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 text-[12.5px] font-medium text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors"
++                          title="Удалить в корзину"
++                        >
++                          <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
++                        </button>
++                      )}
++                    </>
+                   )}
+-                  <h3 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100 truncate">
+-                    {sess.title}
+-                  </h3>
+                 </div>
+-                <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mt-1 truncate">
+-                  {sess.messages[sess.messages.length - 1]?.content}
+-                </p>
+               </div>
+-              <div className="flex items-center gap-3 shrink-0">
+-                <span className="text-[12px] text-slate-400 tabular-nums">{sess.updatedAt}</span>
+-                <button
+-                  type="button"
+-                  onClick={() => onOpenSession(sess)}
+-                  className="focus-ring px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-600 hover:text-white text-[12.5px] font-semibold text-slate-800 dark:text-slate-200 transition-colors"
+-                >
+-                  Открыть
+-                </button>
+-              </div>
+-            </div>
+-          ))}
++            );
++          })}
+         </div>
+       )}
+     </section>
+diff --git a/src/services/api.ts b/src/services/api.ts
+index b9a7c00..e665a23 100644
+--- a/src/services/api.ts
++++ b/src/services/api.ts
+@@ -18,6 +18,8 @@ export interface ConversationRecord {
+   title: string | null;
+   created_at: string;
+   last_message_at: string | null;
++  archived_at?: string | null;
++  deleted_at?: string | null;
+   messages?: MessageRecord[];
+ }
+ 
+@@ -370,8 +372,11 @@ export const authApi = {
+   },
+ };
+ 
++export type ConversationStatusFilter = 'active' | 'archived' | 'deleted' | 'all';
++
+ export const conversationsApi = {
+-  list: () => request<ConversationRecord[]>('/conversations'),
++  list: (status: ConversationStatusFilter = 'all') =>
++    request<ConversationRecord[]>(`/conversations?status=${encodeURIComponent(status)}`),
+ 
+   get: (id: number) =>
+     request<ConversationRecord & { messages: MessageRecord[] }>(`/conversations/${id}`),
+@@ -388,10 +393,25 @@ export const conversationsApi = {
+       body: JSON.stringify({ title }),
+     }),
+ 
+-  delete: (id: number) =>
+-    request<void>(`/conversations/${id}`, {
+-      method: 'DELETE',
++  archive: (id: number, archived = true) =>
++    request<ConversationRecord>(`/conversations/${id}`, {
++      method: 'PATCH',
++      body: JSON.stringify({ archived }),
+     }),
++
++  restore: (id: number, fromArchive = false) =>
++    request<ConversationRecord>(`/conversations/${id}/restore`, {
++      method: 'POST',
++      body: JSON.stringify({ fromArchive }),
++    }),
++
++  delete: (id: number, permanent = false) =>
++    request<ConversationRecord | void>(
++      `/conversations/${id}${permanent ? '?permanent=true' : ''}`,
++      {
++        method: 'DELETE',
++      }
++    ),
+ };
+ 
+ export const messagesApi = {
+diff --git a/src/utils/dashboardLogic.test.ts b/src/utils/dashboardLogic.test.ts
+index 87981ee..4e12c3d 100644
+--- a/src/utils/dashboardLogic.test.ts
++++ b/src/utils/dashboardLogic.test.ts
+@@ -1109,6 +1109,180 @@ test('chatApi.streamCompletions streams incremental tokens before [DONE], flushe
+   }
+ });
+ 
++test('INITIAL_CHAT_LISTS uses zero counts and computeChatListCategories stays synchronized across archive, soft delete, restore, and permanent delete', async () => {
++  const {
++    INITIAL_CHAT_LISTS,
++    computeChatListCategories,
++    getSessionsForCategory,
++    archiveSessionInList,
++    unarchiveSessionInList,
++    softDeleteSessionInList,
++    restoreDeletedSessionInList,
++    permanentlyDeleteSessionInList,
++    filterWorkspaceContent,
++    INITIAL_TEMPLATES,
++    INITIAL_DOCUMENTS,
++  } = await import('./dashboardLogic');
++
++  // 1. Default list counts must never be hardcoded (e.g., 8 or 2)
++  for (const list of INITIAL_CHAT_LISTS) {
++    assert.equal(list.count, 0, `List ${list.id} must initialize with count 0`);
++  }
++
++  const baseSessions = [
++    {
++      id: 'conv-1',
++      conversationId: 1,
++      title: 'Активный диалог',
++      categoryId: 'code',
++      updatedAt: '10:00',
++      starred: true,
++      archivedAt: null,
++      deletedAt: null,
++      messages: [],
++    },
++    {
++      id: 'conv-2',
++      conversationId: 2,
++      title: 'Маркетинговый бриф',
++      categoryId: 'marketing',
++      updatedAt: '10:05',
++      starred: false,
++      archivedAt: null,
++      deletedAt: null,
++      messages: [],
++    },
++  ];
++
++  // Initial counts match active sessions
++  let counts = computeChatListCategories(INITIAL_CHAT_LISTS, baseSessions);
++  assert.equal(counts.find((c) => c.id === 'favorites')?.count, 1);
++  assert.equal(counts.find((c) => c.id === 'code')?.count, 1);
++  assert.equal(counts.find((c) => c.id === 'marketing')?.count, 1);
++  assert.equal(counts.find((c) => c.id === 'archive')?.count, 0);
++  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 0);
++
++  // 2. Archive conv-2 -> disappears from active/marketing, appears in archive (count=1)
++  let current = archiveSessionInList(baseSessions, 'conv-2', '2026-11-21T10:10:00.000Z');
++  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
++  assert.equal(counts.find((c) => c.id === 'archive')?.count, 1);
++  assert.equal(counts.find((c) => c.id === 'marketing')?.count, 0);
++  assert.deepEqual(
++    getSessionsForCategory(current, null).map((s) => s.id),
++    ['conv-1']
++  );
++  assert.deepEqual(
++    filterWorkspaceContent({
++      sessions: current,
++      templates: INITIAL_TEMPLATES,
++      documents: INITIAL_DOCUMENTS,
++      query: '',
++      categoryId: 'archive',
++    }).sessions.map((s) => s.id),
++    ['conv-2']
++  );
++
++  // 3. Unarchive conv-2 -> returns to active/marketing, archive count drops back to 0
++  current = unarchiveSessionInList(current, 'conv-2');
++  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
++  assert.equal(counts.find((c) => c.id === 'archive')?.count, 0);
++  assert.equal(counts.find((c) => c.id === 'marketing')?.count, 1);
++
++  // 4. Soft-delete conv-1 -> disappears from active & favorites, moves to deleted (count=1)
++  current = softDeleteSessionInList(current, 'conv-1', '2026-11-21T10:15:00.000Z');
++  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
++  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 1);
++  assert.equal(counts.find((c) => c.id === 'favorites')?.count, 0);
++  assert.equal(counts.find((c) => c.id === 'code')?.count, 0);
++  assert.deepEqual(
++    getSessionsForCategory(current, 'deleted').map((s) => s.id),
++    ['conv-1']
++  );
++
++  // 5. Restore conv-1 -> returns to active & favorites, deleted count drops to 0
++  current = restoreDeletedSessionInList(current, 'conv-1');
++  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
++  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 0);
++  assert.equal(counts.find((c) => c.id === 'favorites')?.count, 1);
++
++  // 6. Permanent delete -> completely removed from all lists
++  current = softDeleteSessionInList(current, 'conv-1', '2026-11-21T10:20:00.000Z');
++  current = permanentlyDeleteSessionInList(current, 'conv-1');
++  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
++  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 0);
++  assert.equal(current.length, 1);
++  assert.equal(current[0].id, 'conv-2');
++});
++
++test('Admin Panel initial state and deserializeWorkspaceState never leak mock data or stale counts in production mode', async () => {
++  const {
++    getInitialAdminPanelState,
++    deserializeWorkspaceState,
++    DEFAULT_ADMIN_USERS,
++    DEFAULT_MODEL_PARAMETERS,
++  } = await import('./dashboardLogic');
++
++  const demoUsage = {
++    summary: [{ event_type: 'model_call', count: 150 }],
++    daily: [],
++    events: [],
++  };
++
++  // Production mode must never pre-populate demo stats or DEFAULT_ADMIN_USERS
++  const prodInit = getInitialAdminPanelState({
++    isDemoMode: false,
++    persistedAdminUsers: DEFAULT_ADMIN_USERS,
++    demoUsage,
++  });
++  assert.deepEqual(prodInit.users, []);
++  assert.equal(prodInit.usage, null);
++  assert.equal(prodInit.loaded, false);
++
++  // Demo mode retains demo data when explicitly enabled
++  const demoInit = getInitialAdminPanelState({
++    isDemoMode: true,
++    persistedAdminUsers: DEFAULT_ADMIN_USERS,
++    demoUsage,
++  });
++  assert.equal(demoInit.users.length, DEFAULT_ADMIN_USERS.length);
++  assert.equal(demoInit.usage?.summary[0].count, 150);
++  assert.equal(demoInit.loaded, true);
++
++  // Stale hardcoded counts in localStorage (e.g., archive: 8, deleted: 2) are recomputed from actual sessions
++  const staleSerialized = JSON.stringify({
++    theme: 'light',
++    isDemoMode: false,
++    demoRole: 'user',
++    sessions: [
++      {
++        id: 'conv-9',
++        title: 'Удалённый диалог',
++        categoryId: 'code',
++        updatedAt: '12:00',
++        deletedAt: '2026-11-21T12:00:00.000Z',
++        messages: [],
++      },
++    ],
++    activeSessionId: 'conv-9',
++    activeNav: 'chats',
++    activeCategoryId: null,
++    chatLists: [
++      { id: 'archive', label: 'Архив', colorHex: '#EF4444', count: 8 },
++      { id: 'deleted', label: 'Удалённые', colorHex: '#F97316', count: 2 },
++    ],
++    adminUsers: DEFAULT_ADMIN_USERS,
++    modelParams: DEFAULT_MODEL_PARAMETERS,
++  });
++
++  const restored = deserializeWorkspaceState(staleSerialized);
++  assert.ok(restored);
++  assert.deepEqual(restored.adminUsers, []);
++  assert.equal(restored.activeSessionId, null);
++  assert.equal(restored.chatLists.find((l) => l.id === 'archive')?.count, 0);
++  assert.equal(restored.chatLists.find((l) => l.id === 'deleted')?.count, 1);
++});
++
++
+ 
+ 
+ 
+diff --git a/src/utils/dashboardLogic.ts b/src/utils/dashboardLogic.ts
+index 9ed9596..c509362 100644
+--- a/src/utils/dashboardLogic.ts
++++ b/src/utils/dashboardLogic.ts
+@@ -71,6 +71,8 @@ export interface ChatSession {
+   updatedAt: string;
+   messages: ChatMessage[];
+   starred?: boolean;
++  archivedAt?: string | null;
++  deletedAt?: string | null;
+ }
+ 
+ export interface ModelParameters {
+@@ -81,11 +83,11 @@ export interface ModelParameters {
+ }
+ 
+ export const INITIAL_CHAT_LISTS: ChatListCategory[] = [
+-  { id: 'favorites', label: 'Избранное', colorHex: '#F59E0B', isStar: true, count: 3 },
+-  { id: 'code', label: 'Код', colorHex: '#4A90E2', count: 5 },
+-  { id: 'marketing', label: 'Маркетинг', colorHex: '#34C759', count: 4 },
+-  { id: 'archive', label: 'Архив', colorHex: '#EF4444', count: 8 },
+-  { id: 'deleted', label: 'Удалённые', colorHex: '#F97316', count: 2 },
++  { id: 'favorites', label: 'Избранное', colorHex: '#F59E0B', isStar: true, count: 0 },
++  { id: 'code', label: 'Код', colorHex: '#4A90E2', count: 0 },
++  { id: 'marketing', label: 'Маркетинг', colorHex: '#34C759', count: 0 },
++  { id: 'archive', label: 'Архив', colorHex: '#EF4444', count: 0 },
++  { id: 'deleted', label: 'Удалённые', colorHex: '#F97316', count: 0 },
+ ];
+ 
+ export const QUICK_PROMPTS: QuickPrompt[] = [
+@@ -394,6 +396,128 @@ export function createCustomChatList(
+   };
+ }
+ 
++export function isSessionDeleted(session: ChatSession): boolean {
++  return Boolean(session.deletedAt);
++}
++
++export function isSessionArchived(session: ChatSession): boolean {
++  return !session.deletedAt && Boolean(session.archivedAt);
++}
++
++export function isSessionActive(session: ChatSession): boolean {
++  return !session.deletedAt && !session.archivedAt;
++}
++
++/**
++ * Returns deduplicated chat sessions belonging to a specific sidebar category (or all active chats when categoryId is null).
++ */
++export function getSessionsForCategory(
++  sessions: ChatSession[],
++  categoryId: string | null
++): ChatSession[] {
++  const unique = deduplicateSessions(sessions);
++  if (categoryId === 'deleted') {
++    return unique.filter(isSessionDeleted);
++  }
++  if (categoryId === 'archive') {
++    return unique.filter(isSessionArchived);
++  }
++  if (categoryId === 'favorites') {
++    return unique.filter(
++      (s) => isSessionActive(s) && Boolean(s.starred || s.categoryId === 'favorites')
++    );
++  }
++  if (categoryId) {
++    return unique.filter((s) => isSessionActive(s) && s.categoryId === categoryId);
++  }
++  return unique.filter(isSessionActive);
++}
++
++/**
++ * Recomputes chat list category counts directly from the live sessions array so counters never drift from actual items.
++ */
++export function computeChatListCategories(
++  chatLists: ChatListCategory[],
++  sessions: ChatSession[]
++): ChatListCategory[] {
++  return chatLists.map((list) => ({
++    ...list,
++    count: getSessionsForCategory(sessions, list.id).length,
++  }));
++}
++
++export function archiveSessionInList(
++  sessions: ChatSession[],
++  sessionId: string,
++  archivedAtIso: string = new Date().toISOString()
++): ChatSession[] {
++  return sessions.map((s) =>
++    s.id === sessionId && !s.deletedAt ? { ...s, archivedAt: s.archivedAt || archivedAtIso } : s
++  );
++}
++
++export function unarchiveSessionInList(
++  sessions: ChatSession[],
++  sessionId: string
++): ChatSession[] {
++  return sessions.map((s) =>
++    s.id === sessionId ? { ...s, archivedAt: null } : s
++  );
++}
++
++export function softDeleteSessionInList(
++  sessions: ChatSession[],
++  sessionId: string,
++  deletedAtIso: string = new Date().toISOString()
++): ChatSession[] {
++  return sessions.map((s) =>
++    s.id === sessionId ? { ...s, deletedAt: s.deletedAt || deletedAtIso } : s
++  );
++}
++
++export function restoreDeletedSessionInList(
++  sessions: ChatSession[],
++  sessionId: string
++): ChatSession[] {
++  return sessions.map((s) =>
++    s.id === sessionId ? { ...s, deletedAt: null } : s
++  );
++}
++
++export function permanentlyDeleteSessionInList(
++  sessions: ChatSession[],
++  sessionId: string
++): ChatSession[] {
++  return sessions.filter((s) => s.id !== sessionId);
++}
++
++/**
++ * Returns safe initial state for the Admin Panel.
++ * In production mode (isDemoMode === false), never seeds mock/demo users or fake usage numbers.
++ */
++export function getInitialAdminPanelState<TUser, TUsage>(params: {
++  isDemoMode: boolean;
++  persistedAdminUsers: TUser[];
++  demoUsage: TUsage;
++}): {
++  users: TUser[];
++  usage: TUsage | null;
++  loaded: boolean;
++} {
++  if (params.isDemoMode) {
++    return {
++      users: params.persistedAdminUsers,
++      usage: params.demoUsage,
++      loaded: true,
++    };
++  }
++  return {
++    users: [],
++    usage: null,
++    loaded: false,
++  };
++}
++
+ /**
+  * Filters chat sessions, templates, and documents by a search query and optional category ID.
+  */
+@@ -412,11 +536,8 @@ export function filterWorkspaceContent(params: {
+   const normalizedQuery = params.query.trim().toLowerCase();
+   const categoryId = params.categoryId ?? null;
+ 
+-  const filteredSessions = params.sessions.filter((session) => {
+-    const matchesCategory =
+-      !categoryId ||
+-      (categoryId === 'favorites' ? Boolean(session.starred || session.categoryId === 'favorites') : session.categoryId === categoryId);
+-    if (!matchesCategory) return false;
++  const baseSessions = getSessionsForCategory(params.sessions, categoryId);
++  const filteredSessions = baseSessions.filter((session) => {
+     if (!normalizedQuery) return true;
+     const inTitle = session.title.toLowerCase().includes(normalizedQuery);
+     const inMessages = session.messages.some((m) => m.content.toLowerCase().includes(normalizedQuery));
+@@ -702,6 +823,8 @@ export function mapBackendConversationToSession(
+     title: string | null;
+     created_at: string;
+     last_message_at: string | null;
++    archived_at?: string | null;
++    deleted_at?: string | null;
+     messages?: Array<{
+       id: number;
+       conversation_id: number;
+@@ -739,6 +862,8 @@ export function mapBackendConversationToSession(
+     categoryId: existingSession?.categoryId ?? 'code',
+     updatedAt: formatTimestampShort(conv.last_message_at || conv.created_at),
+     starred: existingSession?.starred ?? false,
++    archivedAt: conv.archived_at ?? null,
++    deletedAt: conv.deleted_at ?? null,
+     messages: mappedMessages,
+   };
+ }
+@@ -942,8 +1067,14 @@ export function deserializeWorkspaceState(
+     const demoRole: 'admin' | 'user' = parsed.demoRole === 'admin' ? 'admin' : 'user';
+     const isDemoMode = Boolean(parsed.isDemoMode);
+     const sessions = Array.isArray(parsed.sessions)
+-      ? sanitizePersistedSessions(parsed.sessions)
+-      : INITIAL_SESSIONS;
++      ? sanitizePersistedSessions(parsed.sessions).map((s) => ({
++          ...s,
++          archivedAt: typeof s.archivedAt === 'string' ? s.archivedAt : null,
++          deletedAt: typeof s.deletedAt === 'string' ? s.deletedAt : null,
++        }))
++      : isDemoMode
++        ? INITIAL_SESSIONS
++        : [];
+ 
+     const validNavs: NavSectionId[] = [
+       'chats',
+@@ -964,19 +1095,22 @@ export function deserializeWorkspaceState(
+ 
+     const activeSessionId =
+       typeof parsed.activeSessionId === 'string' &&
+-      sessions.some((s) => s.id === parsed.activeSessionId)
++      sessions.some((s) => s.id === parsed.activeSessionId && !s.deletedAt)
+         ? parsed.activeSessionId
+         : null;
+ 
+-    const chatLists =
++    const rawChatLists =
+       Array.isArray(parsed.chatLists) && parsed.chatLists.length > 0
+         ? parsed.chatLists
+         : INITIAL_CHAT_LISTS;
++    const chatLists = computeChatListCategories(rawChatLists, sessions);
+ 
+     const adminUsers =
+-      Array.isArray(parsed.adminUsers) && parsed.adminUsers.length > 0
++      isDemoMode && Array.isArray(parsed.adminUsers) && parsed.adminUsers.length > 0
+         ? parsed.adminUsers
+-        : DEFAULT_ADMIN_USERS;
++        : isDemoMode
++          ? DEFAULT_ADMIN_USERS
++          : [];
+ 
+     const modelParams =
+       parsed.modelParams && validateModelParameters(parsed.modelParams).valid

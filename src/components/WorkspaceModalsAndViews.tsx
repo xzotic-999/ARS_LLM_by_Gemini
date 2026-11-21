@@ -14,6 +14,11 @@ import {
   Lock,
   User,
   Check,
+  Archive,
+  ArchiveRestore,
+  RotateCcw,
+  Trash2,
+  AlertCircle,
 } from 'lucide-react';
 import {
   ChatSession,
@@ -26,6 +31,7 @@ import {
   applyQuotaLimitChange,
   canConfigureQuotas,
   deduplicateSessions,
+  getInitialAdminPanelState,
   validateModelParameters,
   validateProfileUpdate,
 } from '../utils/dashboardLogic';
@@ -40,12 +46,18 @@ import {
 
 interface SecondaryViewProps {
   activeNav: NavSectionId;
+  activeCategoryId?: string | null;
   activeCategoryLabel: string | null;
   sessions: ChatSession[];
   projects: ProjectItem[];
   templates: PromptTemplate[];
   documents: DocumentItem[];
   onOpenSession: (session: ChatSession) => void;
+  onArchiveSession?: (sessionId: string) => Promise<void> | void;
+  onUnarchiveSession?: (sessionId: string) => Promise<void> | void;
+  onDeleteSession?: (sessionId: string) => Promise<void> | void;
+  onRestoreDeletedSession?: (sessionId: string) => Promise<void> | void;
+  onPermanentDeleteSession?: (sessionId: string) => Promise<void> | void;
   onUseTemplate: (promptText: string) => void;
   onResetToNewChat: () => void;
   isDemoMode?: boolean;
@@ -83,25 +95,37 @@ const DEMO_ADMIN_USAGE: AdminUsageResponse = {
 
 export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   activeNav,
+  activeCategoryId = null,
   activeCategoryLabel,
   sessions,
   projects,
   templates,
   documents,
   onOpenSession,
+  onArchiveSession,
+  onUnarchiveSession,
+  onDeleteSession,
+  onRestoreDeletedSession,
+  onPermanentDeleteSession,
   onUseTemplate,
   onResetToNewChat,
   isDemoMode = false,
   user = null,
   quotas = null,
-  persistedAdminUsers = DEFAULT_ADMIN_USERS,
+  persistedAdminUsers = [],
   onUpdateAdminUsers,
   streamDiagnostics = [],
 }) => {
   const isAdmin = canConfigureQuotas(user);
-  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>(persistedAdminUsers);
-  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(DEMO_ADMIN_USAGE);
-  const [adminLoading, setAdminLoading] = useState(false);
+  const initialAdminState = getInitialAdminPanelState({
+    isDemoMode,
+    persistedAdminUsers,
+    demoUsage: DEMO_ADMIN_USAGE,
+  });
+  const [adminUsers, setAdminUsers] = useState<AdminUserRecord[]>(initialAdminState.users);
+  const [adminUsage, setAdminUsage] = useState<AdminUsageResponse | null>(initialAdminState.usage);
+  const [adminLoaded, setAdminLoaded] = useState<boolean>(initialAdminState.loaded);
+  const [adminLoading, setAdminLoading] = useState(!isDemoMode && activeNav === 'admin' && isAdmin);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [quotaDrafts, setQuotaDrafts] = useState<
     Record<number, { daily: string; monthly: string }>
@@ -130,6 +154,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
           : DEFAULT_ADMIN_USERS;
       setAdminUsers(sourceUsers);
       setAdminUsage(DEMO_ADMIN_USAGE);
+      setAdminLoaded(true);
       syncDraftsFromUsers(sourceUsers);
       setAdminLoading(false);
       return;
@@ -142,6 +167,7 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
       ]);
       setAdminUsers(usersRes.users);
       setAdminUsage(usageRes);
+      setAdminLoaded(true);
       syncDraftsFromUsers(usersRes.users);
     } catch (err) {
       setAdminError(
@@ -153,6 +179,12 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   };
 
   useEffect(() => {
+    if (!isDemoMode) {
+      setAdminUsers([]);
+      setAdminUsage(null);
+      setAdminLoaded(false);
+      setQuotaDrafts({});
+    }
     if (activeNav === 'admin' && isAdmin) {
       loadAdminData();
     }
@@ -161,6 +193,8 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   useEffect(() => {
     if (isDemoMode && persistedAdminUsers && persistedAdminUsers.length > 0) {
       setAdminUsers(persistedAdminUsers);
+      setAdminUsage(DEMO_ADMIN_USAGE);
+      setAdminLoaded(true);
       syncDraftsFromUsers(persistedAdminUsers);
     }
   }, [isDemoMode, persistedAdminUsers]);
@@ -214,9 +248,38 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
 
   // Read-only quota view for regular users (or if non-admin navigates to 'admin' or 'quotas')
   if (activeNav === 'quotas' || (activeNav === 'admin' && !isAdmin)) {
+    if (!quotas && !isDemoMode) {
+      return (
+        <section
+          aria-label="Мои квоты запросов"
+          className="max-w-[920px] mx-auto w-full px-6 py-8 space-y-6"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
+              <span>Мои квоты и лимиты запросов</span>
+            </h2>
+            <button
+              type="button"
+              onClick={onResetToNewChat}
+              className="focus-ring px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              К новому чату
+            </button>
+          </div>
+          <div
+            role="status"
+            className="p-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] text-[13.5px] text-slate-600 dark:text-slate-300"
+          >
+            Загрузка актуальных квот учётной записи...
+          </div>
+        </section>
+      );
+    }
+
     const effectiveQuotas: QuotaLimits = quotas ?? {
-      daily: { used: 4, limit: 20 },
-      monthly: { used: 38, limit: 500 },
+      daily: { used: 0, limit: null },
+      monthly: { used: 0, limit: null },
     };
     const dailyLimit =
       typeof effectiveQuotas.daily.limit === 'number' && effectiveQuotas.daily.limit >= 0
@@ -379,9 +442,20 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
         {adminError && (
           <div
             role="alert"
-            className="p-3.5 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300"
+            className="p-4 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[13px] text-red-700 dark:text-red-300 flex flex-wrap items-center justify-between gap-3"
           >
-            {adminError}
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+              <span>{adminError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={loadAdminData}
+              disabled={adminLoading}
+              className="focus-ring px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[12px] font-semibold"
+            >
+              Повторить попытку
+            </button>
           </div>
         )}
 
@@ -394,8 +468,25 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
           </div>
         )}
 
-        {/* Usage Summary Cards */}
-        {adminUsage && (
+        {/* Loading State (prevents flashing mock/hardcoded numbers before real API data arrives) */}
+        {!isDemoMode && adminLoading && !adminLoaded && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="p-8 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] flex flex-col items-center justify-center gap-3 text-center"
+          >
+            <RefreshCw className="w-6 h-6 text-indigo-600 dark:text-indigo-400 animate-spin" aria-hidden="true" />
+            <div className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
+              Загрузка статистики и квот пользователей...
+            </div>
+            <p className="text-[12.5px] text-slate-500 dark:text-slate-400">
+              Получаем актуальные данные из базы PostgreSQL.
+            </p>
+          </div>
+        )}
+
+        {/* Usage Summary Cards (rendered only after real data loads or in demo mode) */}
+        {(isDemoMode || adminLoaded) && adminUsage && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]">
               <div className="text-[12px] text-slate-500 dark:text-slate-400">Пользователей в системе</div>
@@ -403,104 +494,128 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
                 {adminUsers.length}
               </div>
             </div>
-            {adminUsage.summary.slice(0, 2).map((item) => (
-              <div
-                key={item.event_type}
-                className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]"
-              >
-                <div className="text-[12px] text-slate-500 dark:text-slate-400">
-                  Событие: <span className="font-mono">{item.event_type}</span> (30 дн.)
+            {adminUsage.summary.length > 0 ? (
+              adminUsage.summary.slice(0, 2).map((item) => (
+                <div
+                  key={item.event_type}
+                  className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829]"
+                >
+                  <div className="text-[12px] text-slate-500 dark:text-slate-400">
+                    Событие: <span className="font-mono">{item.event_type}</span> (30 дн.)
+                  </div>
+                  <div className="text-[22px] font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
+                    {item.count}
+                  </div>
                 </div>
-                <div className="text-[22px] font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
-                  {item.count}
+              ))
+            ) : (
+              <div className="sm:col-span-2 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] flex items-center justify-between">
+                <div>
+                  <div className="text-[12px] text-slate-500 dark:text-slate-400">
+                    События использования (30 дн.)
+                  </div>
+                  <div className="text-[14px] font-semibold text-slate-800 dark:text-slate-200 mt-1">
+                    За последние 30 дней событий пока не зафиксировано
+                  </div>
                 </div>
+                <span className="text-[22px] font-bold text-slate-900 dark:text-white tabular-nums">0</span>
               </div>
-            ))}
+            )}
           </div>
         )}
 
-        {/* Users & Quotas Table */}
-        <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
-                <th className="py-3 px-4">Пользователь</th>
-                <th className="py-3 px-4">Роль</th>
-                <th className="py-3 px-4">Дневной лимит (исп. / лимит)</th>
-                <th className="py-3 px-4">Месячный лимит (исп. / лимит)</th>
-                <th className="py-3 px-4 text-right">Действие</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
-              {adminUsers.map((u) => {
-                const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
-                return (
-                  <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
-                    <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
-                      {u.email}
-                    </td>
-                    <td className="py-3.5 px-4 text-[13px] text-slate-600 dark:text-slate-300">
-                      {u.role === 'admin' ? 'Администратор' : 'Сотрудник'}
-                    </td>
-                    <td className="py-3.5 px-4 tabular-nums">
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
-                          {u.quotas.daily.used} /
-                        </span>
-                        <input
-                          type="number"
-                          min="0"
-                          aria-label={`Дневной лимит для ${u.email}`}
-                          value={draft.daily}
-                          onChange={(e) =>
-                            setQuotaDrafts((prev) => ({
-                              ...prev,
-                              [u.id]: { ...draft, daily: e.target.value },
-                            }))
-                          }
-                          placeholder="Без лимита"
-                          className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
-                        />
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4 tabular-nums">
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
-                          {u.quotas.monthly.used} /
-                        </span>
-                        <input
-                          type="number"
-                          min="0"
-                          aria-label={`Месячный лимит для ${u.email}`}
-                          value={draft.monthly}
-                          onChange={(e) =>
-                            setQuotaDrafts((prev) => ({
-                              ...prev,
-                              [u.id]: { ...draft, monthly: e.target.value },
-                            }))
-                          }
-                          placeholder="Без лимита"
-                          className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
-                        />
-                      </div>
-                    </td>
-                    <td className="py-3.5 px-4 text-right">
-                      <button
-                        type="button"
-                        onClick={() => handleSaveUserQuota(u.id)}
-                        aria-label={`Сохранить квоты для ${u.email}`}
-                        className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12.5px] font-semibold"
-                      >
-                        <Save className="w-3.5 h-3.5" aria-hidden="true" />
-                        <span>Сохранить</span>
-                      </button>
+        {/* Users & Quotas Table (rendered only after real data loads or in demo mode) */}
+        {(isDemoMode || adminLoaded) && (
+          <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
+                  <th className="py-3 px-4">Пользователь</th>
+                  <th className="py-3 px-4">Роль</th>
+                  <th className="py-3 px-4">Дневной лимит (исп. / лимит)</th>
+                  <th className="py-3 px-4">Месячный лимит (исп. / лимит)</th>
+                  <th className="py-3 px-4 text-right">Действие</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
+                {adminUsers.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="py-6 px-4 text-center text-[13px] text-slate-500 dark:text-slate-400">
+                      Пользователи в системе не найдены.
                     </td>
                   </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                ) : (
+                  adminUsers.map((u) => {
+                    const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
+                    return (
+                      <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                        <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
+                          {u.email}
+                        </td>
+                        <td className="py-3.5 px-4 text-[13px] text-slate-600 dark:text-slate-300">
+                          {u.role === 'admin' ? 'Администратор' : 'Сотрудник'}
+                        </td>
+                        <td className="py-3.5 px-4 tabular-nums">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
+                              {u.quotas.daily.used} /
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              aria-label={`Дневной лимит для ${u.email}`}
+                              value={draft.daily}
+                              onChange={(e) =>
+                                setQuotaDrafts((prev) => ({
+                                  ...prev,
+                                  [u.id]: { ...draft, daily: e.target.value },
+                                }))
+                              }
+                              placeholder="Без лимита"
+                              className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+                            />
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 tabular-nums">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
+                              {u.quotas.monthly.used} /
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              aria-label={`Месячный лимит для ${u.email}`}
+                              value={draft.monthly}
+                              onChange={(e) =>
+                                setQuotaDrafts((prev) => ({
+                                  ...prev,
+                                  [u.id]: { ...draft, monthly: e.target.value },
+                                }))
+                              }
+                              placeholder="Без лимита"
+                              className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+                            />
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 text-right">
+                          <button
+                            type="button"
+                            onClick={() => handleSaveUserQuota(u.id)}
+                            aria-label={`Сохранить квоты для ${u.email}`}
+                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12.5px] font-semibold"
+                          >
+                            <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>Сохранить</span>
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
 
         {/* Protected Admin Streaming Diagnostics (numeric metrics only: no prompts, replies, or keys) */}
         {(() => {
@@ -796,18 +911,34 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   }
 
   // History or Category filtered sessions view
+  const displayedSessions = deduplicateSessions(sessions);
+  const isArchiveView = activeCategoryId === 'archive';
+  const isDeletedView = activeCategoryId === 'deleted';
+
   return (
     <section
       aria-label={activeCategoryLabel ? `Список: ${activeCategoryLabel}` : 'История чатов'}
       className="max-w-[920px] mx-auto w-full px-6 py-8"
     >
-      <div className="flex items-center justify-between gap-4 mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
         <div>
-          <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100">
-            {activeCategoryLabel ? `Список чатов: ${activeCategoryLabel}` : 'История диалогов'}
+          <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
+            <span>
+              {activeCategoryLabel ? `Список чатов: ${activeCategoryLabel}` : 'История диалогов'}
+            </span>
+            <span
+              data-testid="section-sessions-count"
+              className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-[13px] font-semibold text-slate-700 dark:text-slate-300 tabular-nums"
+            >
+              {displayedSessions.length}
+            </span>
           </h2>
           <p className="text-[13.5px] text-slate-600 dark:text-slate-400 mt-1">
-            Выберите диалог для продолжения работы или начните новый чат.
+            {isDeletedView
+              ? 'Удалённые диалоги можно восстановить в основной список или удалить навсегда.'
+              : isArchiveView
+                ? 'Архивированные диалоги скрыты из основного списка; их можно открыть или вернуть из архива.'
+                : 'Выберите диалог для продолжения работы, архивируйте или начните новый чат.'}
           </p>
         </div>
         <button
@@ -819,14 +950,22 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
         </button>
       </div>
 
-      {sessions.length === 0 ? (
+      {displayedSessions.length === 0 ? (
         <div className="p-8 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] text-center">
           <Clock className="w-8 h-8 text-slate-400 mx-auto mb-2" aria-hidden="true" />
           <h3 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100">
-            В этом разделе пока нет диалогов
+            {isDeletedView
+              ? 'Удалённых диалогов нет'
+              : isArchiveView
+                ? 'Архив диалогов пуст'
+                : 'В этом разделе пока нет диалогов'}
           </h3>
           <p className="text-[13px] text-slate-500 dark:text-slate-400 mt-1 mb-4">
-            Создайте новый чат или выберите другой фильтр в боковой панели.
+            {isDeletedView
+              ? 'При удалении чата из рабочего пространства он попадёт в этот раздел.'
+              : isArchiveView
+                ? 'Отправьте любой активный диалог в архив, чтобы он появился здесь.'
+                : 'Создайте новый чат или выберите другой фильтр в боковой панели.'}
           </p>
           <button
             type="button"
@@ -837,37 +976,112 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
           </button>
         </div>
       ) : (
-        <div className="space-y-3">
-          {deduplicateSessions(sessions).map((sess) => (
-            <div
-              key={sess.id}
-              className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 flex items-center justify-between gap-4 transition-colors"
-            >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  {sess.starred && (
-                    <Star className="w-4 h-4 text-[#F59E0B] fill-[#F59E0B] shrink-0" aria-hidden="true" />
-                  )}
-                  <h3 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100 truncate">
-                    {sess.title}
-                  </h3>
+        <div className="space-y-3" data-testid="section-sessions-list">
+          {displayedSessions.map((sess) => {
+            const sessionIsDeleted = Boolean(sess.deletedAt) || isDeletedView;
+            const sessionIsArchived = !sessionIsDeleted && (Boolean(sess.archivedAt) || isArchiveView);
+
+            return (
+              <div
+                key={sess.id}
+                className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131829] hover:border-indigo-400 dark:hover:border-indigo-500/70 flex flex-wrap items-center justify-between gap-4 transition-colors"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    {sess.starred && (
+                      <Star className="w-4 h-4 text-[#F59E0B] fill-[#F59E0B] shrink-0" aria-hidden="true" />
+                    )}
+                    <h3 className="text-[15px] font-semibold text-slate-900 dark:text-slate-100 truncate">
+                      {sess.title}
+                    </h3>
+                  </div>
+                  <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mt-1 truncate">
+                    {sess.messages[sess.messages.length - 1]?.content || 'Без сообщений'}
+                  </p>
                 </div>
-                <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mt-1 truncate">
-                  {sess.messages[sess.messages.length - 1]?.content}
-                </p>
+
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <span className="text-[12px] text-slate-400 tabular-nums mr-1">{sess.updatedAt}</span>
+
+                  {sessionIsDeleted ? (
+                    <>
+                      {onRestoreDeletedSession && (
+                        <button
+                          type="button"
+                          onClick={() => onRestoreDeletedSession(sess.id)}
+                          aria-label={`Восстановить диалог «${sess.title}»`}
+                          className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-600 hover:text-white text-[12.5px] font-semibold text-indigo-700 dark:text-indigo-300 transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Восстановить</span>
+                        </button>
+                      )}
+                      {onPermanentDeleteSession && (
+                        <button
+                          type="button"
+                          onClick={() => onPermanentDeleteSession(sess.id)}
+                          aria-label={`Удалить навсегда диалог «${sess.title}»`}
+                          className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-50 dark:bg-red-950/40 hover:bg-red-600 hover:text-white text-[12.5px] font-semibold text-red-700 dark:text-red-300 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>Удалить навсегда</span>
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onOpenSession(sess)}
+                        aria-label={`Открыть диалог «${sess.title}»`}
+                        className="focus-ring px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-600 hover:text-white text-[12.5px] font-semibold text-slate-800 dark:text-slate-200 transition-colors"
+                      >
+                        Открыть
+                      </button>
+
+                      {sessionIsArchived ? (
+                        onUnarchiveSession && (
+                          <button
+                            type="button"
+                            onClick={() => onUnarchiveSession(sess.id)}
+                            aria-label={`Восстановить из архива «${sess.title}»`}
+                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 text-[12.5px] font-medium text-slate-700 dark:text-slate-200 transition-colors"
+                          >
+                            <ArchiveRestore className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>Восстановить из архива</span>
+                          </button>
+                        )
+                      ) : (
+                        onArchiveSession && (
+                          <button
+                            type="button"
+                            onClick={() => onArchiveSession(sess.id)}
+                            aria-label={`В архив «${sess.title}»`}
+                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-[12.5px] font-medium text-slate-700 dark:text-slate-200 transition-colors"
+                          >
+                            <Archive className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>В архив</span>
+                          </button>
+                        )
+                      )}
+
+                      {onDeleteSession && (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteSession(sess.id)}
+                          aria-label={`Удалить диалог «${sess.title}»`}
+                          className="focus-ring inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-red-300 hover:bg-red-50 dark:hover:bg-red-950/40 text-[12.5px] font-medium text-slate-600 dark:text-slate-300 hover:text-red-600 dark:hover:text-red-400 transition-colors"
+                          title="Удалить в корзину"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
-              <div className="flex items-center gap-3 shrink-0">
-                <span className="text-[12px] text-slate-400 tabular-nums">{sess.updatedAt}</span>
-                <button
-                  type="button"
-                  onClick={() => onOpenSession(sess)}
-                  className="focus-ring px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-indigo-600 hover:text-white text-[12.5px] font-semibold text-slate-800 dark:text-slate-200 transition-colors"
-                >
-                  Открыть
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>

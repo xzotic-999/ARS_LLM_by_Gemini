@@ -643,7 +643,18 @@ interface PreviewConversationRecord {
   title: string | null;
   created_at: string;
   last_message_at: string | null;
+  archived_at: string | null;
+  deleted_at: string | null;
   messages: PreviewMessageRecord[];
+}
+
+interface PreviewUsageEventRecord {
+  id: number;
+  user_id: number;
+  user_email: string;
+  event_type: string;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 }
 
 const previewUsers = new Map<string, PreviewUserRecord>([
@@ -679,9 +690,30 @@ const previewUsers = new Map<string, PreviewUserRecord>([
 
 const previewSessions = new Map<string, string>(); // token -> email
 const previewConversations = new Map<number, PreviewConversationRecord>();
+const previewUsageEvents: PreviewUsageEventRecord[] = [];
 let nextPreviewUserId = 3;
 let nextPreviewConvId = 101;
 let nextPreviewMsgId = 1001;
+let nextPreviewUsageEventId = 1;
+
+function recordPreviewUsageEvent(
+  user: PreviewUserRecord | null | undefined,
+  eventType: string,
+  metadata: Record<string, unknown> | null = null
+): void {
+  if (!user) return;
+  previewUsageEvents.unshift({
+    id: nextPreviewUsageEventId++,
+    user_id: user.id,
+    user_email: user.email,
+    event_type: eventType,
+    metadata,
+    created_at: new Date().toISOString(),
+  });
+  if (previewUsageEvents.length > 200) {
+    previewUsageEvents.length = 200;
+  }
+}
 
 function deriveDefaultDisplayName(email: string, role: 'user' | 'admin'): string {
   if (role === 'admin') return 'Администратор ИТ';
@@ -898,10 +930,36 @@ async function startServer() {
       });
       return;
     }
+
+    const rawDays = parseInt(String(req.query.days ?? ''), 10);
+    const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(365, rawDays) : 30;
+    const cutoffMs = Date.now() - days * 86_400_000;
+
+    const filteredEvents = previewUsageEvents.filter(
+      (ev) => new Date(ev.created_at).getTime() >= cutoffMs
+    );
+
+    const summaryMap = new Map<string, number>();
+    const dailyMap = new Map<string, number>();
+    for (const ev of filteredEvents) {
+      summaryMap.set(ev.event_type, (summaryMap.get(ev.event_type) ?? 0) + 1);
+      const dayKey = `${ev.created_at.slice(0, 10)}|${ev.event_type}`;
+      dailyMap.set(dayKey, (dailyMap.get(dayKey) ?? 0) + 1);
+    }
+
+    const summary = Array.from(summaryMap.entries()).map(([event_type, count]) => ({
+      event_type,
+      count,
+    }));
+    const daily = Array.from(dailyMap.entries()).map(([key, count]) => {
+      const [date, event_type] = key.split('|');
+      return { date, event_type, count };
+    });
+
     res.status(200).json({
-      summary: [{ event_type: 'model_call', count: 42 }],
-      daily: [],
-      events: [],
+      summary,
+      daily,
+      events: filteredEvents.slice(0, 50),
     });
   });
 
@@ -1035,8 +1093,15 @@ async function startServer() {
       res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
       return;
     }
+    const rawStatus = typeof req.query.status === 'string' ? req.query.status : 'active';
     const list = Array.from(previewConversations.values())
-      .filter((c) => c.user_id === userRecord.id)
+      .filter((c) => {
+        if (c.user_id !== userRecord.id) return false;
+        if (rawStatus === 'all') return true;
+        if (rawStatus === 'deleted') return Boolean(c.deleted_at);
+        if (rawStatus === 'archived') return !c.deleted_at && Boolean(c.archived_at);
+        return !c.deleted_at && !c.archived_at;
+      })
       .sort((a, b) => (b.last_message_at || b.created_at).localeCompare(a.last_message_at || a.created_at));
     res.status(200).json(list);
   });
@@ -1055,6 +1120,8 @@ async function startServer() {
       title: rawTitle || 'Новый диалог',
       created_at: now,
       last_message_at: now,
+      archived_at: null,
+      deleted_at: null,
       messages: [],
     };
     previewConversations.set(conv.id, conv);
@@ -1069,7 +1136,7 @@ async function startServer() {
     }
     const convId = Number(req.params.id);
     const conv = previewConversations.get(convId);
-    if (!conv || conv.user_id !== userRecord.id) {
+    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
       res.status(404).json({ error: { message: 'Диалог не найден.' } });
       return;
     }
@@ -1084,12 +1151,49 @@ async function startServer() {
     }
     const convId = Number(req.params.id);
     const conv = previewConversations.get(convId);
-    if (!conv || conv.user_id !== userRecord.id) {
+    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
       res.status(404).json({ error: { message: 'Диалог не найден.' } });
       return;
     }
-    if (typeof req.body?.title === 'string' && req.body.title.trim()) {
-      conv.title = req.body.title.trim();
+    const { title, archived, deleted } = req.body ?? {};
+    if (title === undefined && archived === undefined && deleted === undefined) {
+      res.status(400).json({ error: { message: 'Не переданы поля для обновления.' } });
+      return;
+    }
+    if (archived === true && conv.deleted_at && deleted !== false) {
+      res.status(409).json({
+        error: { message: 'Нельзя архивировать удалённый диалог. Сначала восстановите его.' },
+      });
+      return;
+    }
+    if (typeof title === 'string' && title.trim()) {
+      conv.title = title.trim();
+    }
+    if (typeof archived === 'boolean') {
+      conv.archived_at = archived ? conv.archived_at || new Date().toISOString() : null;
+    }
+    if (typeof deleted === 'boolean') {
+      conv.deleted_at = deleted ? conv.deleted_at || new Date().toISOString() : null;
+    }
+    res.status(200).json(conv);
+  });
+
+  app.post('/api/v1/conversations/:id/restore', (req: Request, res: Response) => {
+    const userRecord = getPreviewSessionUser(req);
+    if (!userRecord) {
+      res.status(401).json({ error: { message: 'Сессия не авторизована.' } });
+      return;
+    }
+    const convId = Number(req.params.id);
+    const conv = previewConversations.get(convId);
+    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
+      res.status(404).json({ error: { message: 'Диалог не найден.' } });
+      return;
+    }
+    if (req.body?.fromArchive) {
+      conv.archived_at = null;
+    } else {
+      conv.deleted_at = null;
     }
     res.status(200).json(conv);
   });
@@ -1102,10 +1206,18 @@ async function startServer() {
     }
     const convId = Number(req.params.id);
     const conv = previewConversations.get(convId);
-    if (conv && conv.user_id === userRecord.id) {
-      previewConversations.delete(convId);
+    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
+      res.status(404).json({ error: { message: 'Диалог не найден.' } });
+      return;
     }
-    res.status(204).end();
+    const isPermanent = req.query.permanent === 'true' || req.query.permanent === '1';
+    if (isPermanent) {
+      previewConversations.delete(convId);
+      res.status(204).end();
+      return;
+    }
+    conv.deleted_at = conv.deleted_at || new Date().toISOString();
+    res.status(200).json(conv);
   });
 
   app.get('/api/v1/messages', (req: Request, res: Response) => {
@@ -1136,6 +1248,14 @@ async function startServer() {
 
     if (!text) {
       res.status(400).json({ error: { message: 'Текст сообщения не может быть пустым.' } });
+      return;
+    }
+
+    const existingConv = previewConversations.get(convId);
+    if (existingConv && existingConv.deleted_at) {
+      res.status(409).json({
+        error: { message: 'Нельзя отправлять сообщения в удалённый диалог. Сначала восстановите его.' },
+      });
       return;
     }
 
@@ -1172,7 +1292,7 @@ async function startServer() {
       }
     }
 
-    let conv = previewConversations.get(convId);
+    let conv = existingConv;
     const now = new Date().toISOString();
     if (!conv) {
       conv = {
@@ -1181,6 +1301,8 @@ async function startServer() {
         title: text.slice(0, 60),
         created_at: now,
         last_message_at: now,
+        archived_at: null,
+        deleted_at: null,
         messages: [],
       };
       previewConversations.set(conv.id, conv);
@@ -1195,6 +1317,13 @@ async function startServer() {
     };
     conv.messages.push(msg);
     conv.last_message_at = now;
+
+    if (role === 'user') {
+      recordPreviewUsageEvent(userRecord, 'message_sent', {
+        conversation_id: conv.id,
+        text_length: text.length,
+      });
+    }
 
     res.status(201).json(msg);
   });
@@ -1538,6 +1667,13 @@ async function startServer() {
         }
 
         commitPreviewReservation();
+        recordPreviewUsageEvent(sessionUser, 'model_call', {
+          mode: 'stream',
+          ttft_ms: ttftMs,
+          total_ms: totalMs,
+          chunk_count: chunkCount,
+          reply_length: emittedChars,
+        });
 
         if (!res.writableEnded && !abortController.signal.aborted) {
           const doneChunk = {
@@ -1582,6 +1718,10 @@ async function startServer() {
       const rawReply = await chatWithFreeLlm(trustedMessages, runtimeConfig);
       const reply = isSecurityRestrictedOutput(rawReply) ? SECURITY_REFUSAL_MESSAGE : rawReply;
       commitPreviewReservation();
+      recordPreviewUsageEvent(sessionUser, 'model_call', {
+        mode: 'unary',
+        reply_length: reply.length,
+      });
       res.status(200).json({
         id: completionId,
         object: 'chat.completion',

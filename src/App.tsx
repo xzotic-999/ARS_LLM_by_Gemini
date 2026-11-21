@@ -29,6 +29,7 @@ import {
   ThemeMode,
   WORKSPACE_STORAGE_KEY,
   applyThemeWithSmoothTransition,
+  archiveSessionInList,
   canConfigureQuotas,
   createCustomChatList,
   deduplicateSessions,
@@ -37,8 +38,12 @@ import {
   filterWorkspaceContent,
   formatTimestampShort,
   mapBackendConversationToSession,
+  permanentlyDeleteSessionInList,
   prependPersonalInstructionsToHistory,
+  restoreDeletedSessionInList,
   serializeWorkspaceState,
+  softDeleteSessionInList,
+  unarchiveSessionInList,
 } from './utils/dashboardLogic';
 import {
   ApiError,
@@ -142,7 +147,9 @@ export default function App() {
   const initialDemoActive = hasDemoQueryParam() || Boolean(initialPersisted?.isDemoMode);
   const initialDemoRole: 'user' | 'admin' =
     getQueryDemoRole() ?? initialPersisted?.demoRole ?? 'user';
-  const initialAdminUsers = initialPersisted?.adminUsers ?? DEFAULT_ADMIN_USERS;
+  const initialAdminUsers = initialDemoActive
+    ? (initialPersisted?.adminUsers ?? DEFAULT_ADMIN_USERS)
+    : [];
 
   const [theme, setTheme] = useState<ThemeMode>(() => initialPersisted?.theme ?? 'light');
   const [authChecked, setAuthChecked] = useState<boolean>(() => initialDemoActive);
@@ -168,19 +175,22 @@ export default function App() {
     return savedNav;
   });
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(
-    () => initialPersisted?.activeCategoryId ?? null
+    () => (initialDemoActive ? (initialPersisted?.activeCategoryId ?? null) : null)
   );
   const [chatLists, setChatLists] = useState<ChatListCategory[]>(
     () => initialPersisted?.chatLists ?? INITIAL_CHAT_LISTS
   );
   const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    if (!initialDemoActive) {
+      return [];
+    }
     if (initialPersisted?.sessions && initialPersisted.sessions.length > 0) {
       return deduplicateSessions(initialPersisted.sessions);
     }
-    return initialDemoActive ? INITIAL_SESSIONS : [];
+    return INITIAL_SESSIONS;
   });
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
-    () => initialPersisted?.activeSessionId ?? null
+    () => (initialDemoActive ? (initialPersisted?.activeSessionId ?? null) : null)
   );
 
   const [promptValue, setPromptValue] = useState('');
@@ -251,12 +261,12 @@ export default function App() {
         theme,
         isDemoMode,
         demoRole,
-        sessions,
-        activeSessionId,
+        sessions: isDemoMode ? sessions : [],
+        activeSessionId: isDemoMode ? activeSessionId : null,
         activeNav,
-        activeCategoryId,
+        activeCategoryId: isDemoMode ? activeCategoryId : null,
         chatLists,
-        adminUsers,
+        adminUsers: isDemoMode ? adminUsers : [],
         modelParams,
         personalInstructions,
         profileDisplayName,
@@ -326,16 +336,13 @@ export default function App() {
   const loadConversations = useCallback(async () => {
     if (isDemoMode) return;
     try {
-      const list = await conversationsApi.list();
+      const list = await conversationsApi.list('all');
       for (const conv of list) {
         if (Array.isArray(conv.messages)) {
           hydratedConversationIdsRef.current.add(conv.id);
         }
       }
       setSessions((prev) => {
-        if (list.length === 0) {
-          return deduplicateSessions(prev);
-        }
         const prevById = new Map(prev.map((s) => [s.id, s]));
         const mappedFromBackend = list.map((conv) => {
           const existing = prevById.get(`conv-${conv.id}`);
@@ -345,9 +352,12 @@ export default function App() {
             existing
           );
         });
-        const backendIds = new Set(mappedFromBackend.map((s) => s.id));
-        const localOnly = prev.filter((s) => !backendIds.has(s.id));
-        return deduplicateSessions([...mappedFromBackend, ...localOnly]);
+        return deduplicateSessions(mappedFromBackend);
+      });
+      setActiveSessionId((prevActive) => {
+        if (!prevActive) return null;
+        const match = list.find((conv) => `conv-${conv.id}` === prevActive);
+        return match && !match.deleted_at ? prevActive : null;
       });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
@@ -395,8 +405,11 @@ export default function App() {
     const res = await authApi.login(email, password);
     hydratedConversationIdsRef.current.clear();
     setIsDemoMode(false);
+    setAdminUsers([]);
+    setSessions([]);
     setUser(res.user);
     setActiveSessionId(null);
+    setActiveCategoryId(null);
     setActiveNav('chats');
     if (res.user.quotas) {
       setBackendQuotas(res.user.quotas);
@@ -434,19 +447,26 @@ export default function App() {
     hydratedConversationIdsRef.current.clear();
     setIsDemoMode(false);
     setUser(null);
+    setAdminUsers([]);
+    setSessions([]);
     setBackendQuotas(null);
     setActiveSessionId(null);
+    setActiveCategoryId(null);
     setStreamError(null);
   }, [isDemoMode]);
 
   const handleSelectSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target?.deletedAt) return;
+
     setActiveSessionId(sessionId);
     setActiveNav('chats');
+    if (!target?.archivedAt) {
+      setActiveCategoryId(null);
+    }
     setStreamError(null);
 
     if (isDemoMode) return;
-
-    const target = sessions.find((s) => s.id === sessionId);
     const convId =
       target?.conversationId ??
       (sessionId.startsWith('conv-') ? parseInt(sessionId.slice(5), 10) : NaN);
@@ -506,19 +526,81 @@ export default function App() {
     }
   }, [isDemoMode, sessions, loadConversations]);
 
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
+  const handleArchiveSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
-    if (target?.conversationId) {
-      hydratedConversationIdsRef.current.delete(target.conversationId);
-    }
-    setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    setSessions((prev) => archiveSessionInList(prev, sessionId));
     setActiveSessionId((prev) => (prev === sessionId ? null : prev));
 
     if (isDemoMode) return;
 
     if (target?.conversationId) {
       try {
-        await conversationsApi.delete(target.conversationId);
+        await conversationsApi.archive(target.conversationId, true);
+      } catch {
+        loadConversations();
+      }
+    }
+  }, [isDemoMode, sessions, loadConversations]);
+
+  const handleUnarchiveSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    setSessions((prev) => unarchiveSessionInList(prev, sessionId));
+
+    if (isDemoMode) return;
+
+    if (target?.conversationId) {
+      try {
+        await conversationsApi.archive(target.conversationId, false);
+      } catch {
+        loadConversations();
+      }
+    }
+  }, [isDemoMode, sessions, loadConversations]);
+
+  const handleDeleteSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    setSessions((prev) => softDeleteSessionInList(prev, sessionId));
+    setActiveSessionId((prev) => (prev === sessionId ? null : prev));
+
+    if (isDemoMode) return;
+
+    if (target?.conversationId) {
+      try {
+        await conversationsApi.delete(target.conversationId, false);
+      } catch {
+        loadConversations();
+      }
+    }
+  }, [isDemoMode, sessions, loadConversations]);
+
+  const handleRestoreDeletedSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    setSessions((prev) => restoreDeletedSessionInList(prev, sessionId));
+
+    if (isDemoMode) return;
+
+    if (target?.conversationId) {
+      try {
+        await conversationsApi.restore(target.conversationId);
+      } catch {
+        loadConversations();
+      }
+    }
+  }, [isDemoMode, sessions, loadConversations]);
+
+  const handlePermanentDeleteSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target?.conversationId) {
+      hydratedConversationIdsRef.current.delete(target.conversationId);
+    }
+    setSessions((prev) => permanentlyDeleteSessionInList(prev, sessionId));
+    setActiveSessionId((prev) => (prev === sessionId ? null : prev));
+
+    if (isDemoMode) return;
+
+    if (target?.conversationId) {
+      try {
+        await conversationsApi.delete(target.conversationId, true);
       } catch {
         loadConversations();
       }
@@ -802,9 +884,13 @@ export default function App() {
         convId = createdConv.id;
         hydratedConversationIdsRef.current.add(convId);
         currentSession = mapBackendConversationToSession(createdConv, []);
-        currentSession.categoryId = activeCategoryId ?? 'code';
+        currentSession.categoryId =
+          activeCategoryId && activeCategoryId !== 'archive' && activeCategoryId !== 'deleted'
+            ? activeCategoryId
+            : 'code';
         setSessions((prev) => deduplicateSessions([currentSession!, ...prev]));
         setActiveSessionId(currentSession.id);
+        setActiveCategoryId(null);
       }
 
       const targetSessionId = currentSession.id;
@@ -1141,6 +1227,7 @@ export default function App() {
           activeSessionId={activeSessionId}
           onSelectSession={handleSelectSession}
           onRenameSession={handleRenameSession}
+          onArchiveSession={handleArchiveSession}
           onDeleteSession={handleDeleteSession}
           user={user}
           quotas={quotas}
@@ -1236,6 +1323,9 @@ export default function App() {
                 onEditUserPrompt={handleEditUserPrompt}
                 quotaBlockStatus={quotaBlockStatus}
                 onOpenQuotasView={handleOpenQuotasView}
+                onArchiveSession={handleArchiveSession}
+                onUnarchiveSession={handleUnarchiveSession}
+                onDeleteSession={handleDeleteSession}
               />
             ) : (
               <Suspense
@@ -1247,6 +1337,7 @@ export default function App() {
               >
                 <WorkspaceSectionView
                   activeNav={activeNav}
+                  activeCategoryId={activeCategoryId}
                   activeCategoryLabel={activeCategory?.label ?? null}
                   sessions={filteredContent.sessions}
                   projects={INITIAL_PROJECTS}
@@ -1255,6 +1346,11 @@ export default function App() {
                   onOpenSession={(sess) => {
                     handleSelectSession(sess.id);
                   }}
+                  onArchiveSession={handleArchiveSession}
+                  onUnarchiveSession={handleUnarchiveSession}
+                  onDeleteSession={handleDeleteSession}
+                  onRestoreDeletedSession={handleRestoreDeletedSession}
+                  onPermanentDeleteSession={handlePermanentDeleteSession}
                   onUseTemplate={(tplText) => {
                     setPromptValue(tplText);
                     setActiveSessionId(null);
@@ -1266,7 +1362,7 @@ export default function App() {
                   isDemoMode={isDemoMode}
                   user={user}
                   quotas={quotas}
-                  persistedAdminUsers={adminUsers}
+                  persistedAdminUsers={isDemoMode ? adminUsers : []}
                   onUpdateAdminUsers={(updatedUsers) => {
                     setAdminUsers(updatedUsers);
                   }}

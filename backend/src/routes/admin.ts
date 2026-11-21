@@ -259,25 +259,76 @@ router.get("/usage", async (req, res, next) => {
       100,
       Math.max(1, parseInt(req.query.limit as string, 10) || 50)
     );
+    const rawDays = parseInt(req.query.days as string, 10);
+    const days = !isNaN(rawDays) && rawDays > 0 ? Math.min(365, rawDays) : 30;
+    const rawUserId = req.query.user_id
+      ? parseInt(req.query.user_id as string, 10)
+      : null;
+    const filterUserId = rawUserId !== null && !isNaN(rawUserId) ? rawUserId : null;
+    const filterEventType =
+      typeof req.query.event_type === "string" && req.query.event_type.trim().length > 0
+        ? req.query.event_type.trim()
+        : null;
 
-    const [eventsRes, summaryRes] = await Promise.all([
+    const filterConditions: string[] = [
+      "ue.created_at >= CURRENT_TIMESTAMP - make_interval(days => $1)",
+    ];
+    const filterParams: unknown[] = [days];
+
+    if (filterUserId !== null) {
+      filterParams.push(filterUserId);
+      filterConditions.push(`ue.user_id = $${filterParams.length}`);
+    }
+
+    if (filterEventType !== null) {
+      filterParams.push(filterEventType);
+      filterConditions.push(`ue.event_type = $${filterParams.length}`);
+    }
+
+    const whereClause = `WHERE ${filterConditions.join(" AND ")}`;
+    const eventsParams = [...filterParams, limit];
+    const limitPlaceholder = `$${eventsParams.length}`;
+
+    const [eventsRes, summaryRes, dailyRes] = await Promise.all([
       pool.query(
-        `SELECT id, user_id, event_type, event_data, created_at
-         FROM usage_events
-         ORDER BY created_at DESC
-         LIMIT $1`,
-        [limit]
+        `SELECT
+           ue.id,
+           ue.user_id,
+           COALESCE(u.email, '') AS user_email,
+           ue.event_type,
+           COALESCE(ue.metadata, ue.event_data) AS metadata,
+           ue.created_at
+         FROM usage_events ue
+         LEFT JOIN users u ON u.id = ue.user_id
+         ${whereClause}
+         ORDER BY ue.created_at DESC
+         LIMIT ${limitPlaceholder}`,
+        eventsParams
       ),
       pool.query(
-        `SELECT event_type, COUNT(*)::int AS count
-         FROM usage_events
-         GROUP BY event_type`
+        `SELECT ue.event_type, COUNT(*)::int AS count
+         FROM usage_events ue
+         ${whereClause}
+         GROUP BY ue.event_type
+         ORDER BY count DESC, ue.event_type ASC`,
+        filterParams
+      ),
+      pool.query(
+        `SELECT
+           to_char(ue.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
+           ue.event_type,
+           COUNT(*)::int AS count
+         FROM usage_events ue
+         ${whereClause}
+         GROUP BY 1, ue.event_type
+         ORDER BY date DESC, ue.event_type ASC`,
+        filterParams
       ),
     ]);
 
     res.json({
       summary: summaryRes.rows,
-      daily: [],
+      daily: dailyRes.rows,
       events: eventsRes.rows,
     });
   } catch (err) {

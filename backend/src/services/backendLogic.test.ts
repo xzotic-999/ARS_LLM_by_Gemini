@@ -700,7 +700,7 @@ test("Plesk + Neon PostgreSQL: validateEnvConfig parses quoted DATABASE_URL with
   );
 });
 
-test("runMigrations executes all 5 SQL migrations in order inside a transaction without advisory locks and is idempotent on repeat run", async () => {
+test("runMigrations executes all 6 SQL migrations in order inside a transaction without advisory locks and is idempotent on repeat run", async () => {
   const { runMigrations } = await import("../db/migrate.js");
 
   const appliedInDb: string[] = [];
@@ -738,7 +738,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction 
     },
   };
 
-  // First run: all 5 migrations should be applied in exact numeric order
+  // First run: all 6 migrations should be applied in exact numeric order
   const firstRunApplied = await runMigrations(mockPoolClient);
   assert.deepEqual(firstRunApplied, [
     "001_initial_migration",
@@ -746,6 +746,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction 
     "003_messages_user_id_nullable",
     "004_messages_cascade_delete",
     "005_users_and_auth",
+    "006_conversations_archive_and_soft_delete",
   ]);
   assert.deepEqual(appliedInDb, [
     "001_initial_migration",
@@ -753,6 +754,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction 
     "003_messages_user_id_nullable",
     "004_messages_cascade_delete",
     "005_users_and_auth",
+    "006_conversations_archive_and_soft_delete",
   ]);
   assert.ok(
     executedQueries.includes("BEGIN") && executedQueries.includes("COMMIT"),
@@ -763,7 +765,7 @@ test("runMigrations executes all 5 SQL migrations in order inside a transaction 
     "Migrations must not use session-level advisory locks that break Neon PgBouncer transaction pooler"
   );
 
-  // Second run: all 5 migrations are already recorded in `migrations` table -> 0 migrations applied
+  // Second run: all 6 migrations are already recorded in `migrations` table -> 0 migrations applied
   const secondRunApplied = await runMigrations(mockPoolClient);
   assert.deepEqual(secondRunApplied, []);
 });
@@ -2367,6 +2369,29 @@ test("True token-by-token SSE streaming: zero 260-char buffering in chat.ts, imm
   );
   assert.equal(unaryReply, "Непотоковый ответ");
 });
+
+test("Conversations archive/soft-delete status filter and additive migration 006 preserve existing data safely", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const { parseConversationStatusFilter } = await import("../routes/conversations.js");
+
+  assert.equal(parseConversationStatusFilter(undefined), "active");
+  assert.equal(parseConversationStatusFilter("active"), "active");
+  assert.equal(parseConversationStatusFilter("archived"), "archived");
+  assert.equal(parseConversationStatusFilter("deleted"), "deleted");
+  assert.equal(parseConversationStatusFilter("all"), "all");
+  assert.equal(parseConversationStatusFilter("unknown"), "active");
+
+  const migrationSql = readFileSync(
+    resolve(process.cwd(), "backend/src/migrations/006_conversations_archive_and_soft_delete.sql"),
+    "utf-8"
+  );
+  assert.match(migrationSql, /ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP NULL/i);
+  assert.match(migrationSql, /ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP NULL/i);
+  assert.match(migrationSql, /CREATE INDEX IF NOT EXISTS idx_conversations_user_state/i);
+  assert.ok(!/\b(DROP|TRUNCATE|DELETE)\b/i.test(migrationSql), "Migration 006 must be strictly additive");
+});
+
 
 
 

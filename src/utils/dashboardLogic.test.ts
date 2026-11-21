@@ -1109,6 +1109,180 @@ test('chatApi.streamCompletions streams incremental tokens before [DONE], flushe
   }
 });
 
+test('INITIAL_CHAT_LISTS uses zero counts and computeChatListCategories stays synchronized across archive, soft delete, restore, and permanent delete', async () => {
+  const {
+    INITIAL_CHAT_LISTS,
+    computeChatListCategories,
+    getSessionsForCategory,
+    archiveSessionInList,
+    unarchiveSessionInList,
+    softDeleteSessionInList,
+    restoreDeletedSessionInList,
+    permanentlyDeleteSessionInList,
+    filterWorkspaceContent,
+    INITIAL_TEMPLATES,
+    INITIAL_DOCUMENTS,
+  } = await import('./dashboardLogic');
+
+  // 1. Default list counts must never be hardcoded (e.g., 8 or 2)
+  for (const list of INITIAL_CHAT_LISTS) {
+    assert.equal(list.count, 0, `List ${list.id} must initialize with count 0`);
+  }
+
+  const baseSessions = [
+    {
+      id: 'conv-1',
+      conversationId: 1,
+      title: 'Активный диалог',
+      categoryId: 'code',
+      updatedAt: '10:00',
+      starred: true,
+      archivedAt: null,
+      deletedAt: null,
+      messages: [],
+    },
+    {
+      id: 'conv-2',
+      conversationId: 2,
+      title: 'Маркетинговый бриф',
+      categoryId: 'marketing',
+      updatedAt: '10:05',
+      starred: false,
+      archivedAt: null,
+      deletedAt: null,
+      messages: [],
+    },
+  ];
+
+  // Initial counts match active sessions
+  let counts = computeChatListCategories(INITIAL_CHAT_LISTS, baseSessions);
+  assert.equal(counts.find((c) => c.id === 'favorites')?.count, 1);
+  assert.equal(counts.find((c) => c.id === 'code')?.count, 1);
+  assert.equal(counts.find((c) => c.id === 'marketing')?.count, 1);
+  assert.equal(counts.find((c) => c.id === 'archive')?.count, 0);
+  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 0);
+
+  // 2. Archive conv-2 -> disappears from active/marketing, appears in archive (count=1)
+  let current = archiveSessionInList(baseSessions, 'conv-2', '2026-11-21T10:10:00.000Z');
+  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
+  assert.equal(counts.find((c) => c.id === 'archive')?.count, 1);
+  assert.equal(counts.find((c) => c.id === 'marketing')?.count, 0);
+  assert.deepEqual(
+    getSessionsForCategory(current, null).map((s) => s.id),
+    ['conv-1']
+  );
+  assert.deepEqual(
+    filterWorkspaceContent({
+      sessions: current,
+      templates: INITIAL_TEMPLATES,
+      documents: INITIAL_DOCUMENTS,
+      query: '',
+      categoryId: 'archive',
+    }).sessions.map((s) => s.id),
+    ['conv-2']
+  );
+
+  // 3. Unarchive conv-2 -> returns to active/marketing, archive count drops back to 0
+  current = unarchiveSessionInList(current, 'conv-2');
+  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
+  assert.equal(counts.find((c) => c.id === 'archive')?.count, 0);
+  assert.equal(counts.find((c) => c.id === 'marketing')?.count, 1);
+
+  // 4. Soft-delete conv-1 -> disappears from active & favorites, moves to deleted (count=1)
+  current = softDeleteSessionInList(current, 'conv-1', '2026-11-21T10:15:00.000Z');
+  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
+  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 1);
+  assert.equal(counts.find((c) => c.id === 'favorites')?.count, 0);
+  assert.equal(counts.find((c) => c.id === 'code')?.count, 0);
+  assert.deepEqual(
+    getSessionsForCategory(current, 'deleted').map((s) => s.id),
+    ['conv-1']
+  );
+
+  // 5. Restore conv-1 -> returns to active & favorites, deleted count drops to 0
+  current = restoreDeletedSessionInList(current, 'conv-1');
+  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
+  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 0);
+  assert.equal(counts.find((c) => c.id === 'favorites')?.count, 1);
+
+  // 6. Permanent delete -> completely removed from all lists
+  current = softDeleteSessionInList(current, 'conv-1', '2026-11-21T10:20:00.000Z');
+  current = permanentlyDeleteSessionInList(current, 'conv-1');
+  counts = computeChatListCategories(INITIAL_CHAT_LISTS, current);
+  assert.equal(counts.find((c) => c.id === 'deleted')?.count, 0);
+  assert.equal(current.length, 1);
+  assert.equal(current[0].id, 'conv-2');
+});
+
+test('Admin Panel initial state and deserializeWorkspaceState never leak mock data or stale counts in production mode', async () => {
+  const {
+    getInitialAdminPanelState,
+    deserializeWorkspaceState,
+    DEFAULT_ADMIN_USERS,
+    DEFAULT_MODEL_PARAMETERS,
+  } = await import('./dashboardLogic');
+
+  const demoUsage = {
+    summary: [{ event_type: 'model_call', count: 150 }],
+    daily: [],
+    events: [],
+  };
+
+  // Production mode must never pre-populate demo stats or DEFAULT_ADMIN_USERS
+  const prodInit = getInitialAdminPanelState({
+    isDemoMode: false,
+    persistedAdminUsers: DEFAULT_ADMIN_USERS,
+    demoUsage,
+  });
+  assert.deepEqual(prodInit.users, []);
+  assert.equal(prodInit.usage, null);
+  assert.equal(prodInit.loaded, false);
+
+  // Demo mode retains demo data when explicitly enabled
+  const demoInit = getInitialAdminPanelState({
+    isDemoMode: true,
+    persistedAdminUsers: DEFAULT_ADMIN_USERS,
+    demoUsage,
+  });
+  assert.equal(demoInit.users.length, DEFAULT_ADMIN_USERS.length);
+  assert.equal(demoInit.usage?.summary[0].count, 150);
+  assert.equal(demoInit.loaded, true);
+
+  // Stale hardcoded counts in localStorage (e.g., archive: 8, deleted: 2) are recomputed from actual sessions
+  const staleSerialized = JSON.stringify({
+    theme: 'light',
+    isDemoMode: false,
+    demoRole: 'user',
+    sessions: [
+      {
+        id: 'conv-9',
+        title: 'Удалённый диалог',
+        categoryId: 'code',
+        updatedAt: '12:00',
+        deletedAt: '2026-11-21T12:00:00.000Z',
+        messages: [],
+      },
+    ],
+    activeSessionId: 'conv-9',
+    activeNav: 'chats',
+    activeCategoryId: null,
+    chatLists: [
+      { id: 'archive', label: 'Архив', colorHex: '#EF4444', count: 8 },
+      { id: 'deleted', label: 'Удалённые', colorHex: '#F97316', count: 2 },
+    ],
+    adminUsers: DEFAULT_ADMIN_USERS,
+    modelParams: DEFAULT_MODEL_PARAMETERS,
+  });
+
+  const restored = deserializeWorkspaceState(staleSerialized);
+  assert.ok(restored);
+  assert.deepEqual(restored.adminUsers, []);
+  assert.equal(restored.activeSessionId, null);
+  assert.equal(restored.chatLists.find((l) => l.id === 'archive')?.count, 0);
+  assert.equal(restored.chatLists.find((l) => l.id === 'deleted')?.count, 1);
+});
+
+
 
 
 

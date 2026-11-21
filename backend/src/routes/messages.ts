@@ -85,9 +85,9 @@ router.post("/", async (req, res, next) => {
       return;
     }
 
-    // Verify conversation ownership
+    // Verify conversation ownership and ensure it is not deleted
     const convCheck = await pool.query(
-      "SELECT user_id FROM conversations WHERE id = $1",
+      "SELECT user_id, deleted_at FROM conversations WHERE id = $1",
       [conversation_id]
     );
 
@@ -98,6 +98,13 @@ router.post("/", async (req, res, next) => {
 
     if (req.user!.role !== "admin" && convCheck.rows[0].user_id !== req.user!.id) {
       res.status(404).json({ error: { message: "Conversation not found." } });
+      return;
+    }
+
+    if (convCheck.rows[0].deleted_at) {
+      res.status(409).json({
+        error: { message: "Cannot send messages to a deleted conversation. Restore it first." },
+      });
       return;
     }
 

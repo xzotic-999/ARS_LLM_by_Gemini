@@ -30,6 +30,8 @@ export interface Conversation {
   user_id: number | null;
   created_at: Date;
   last_message_at: Date;
+  archived_at?: Date | string | null;
+  deleted_at?: Date | string | null;
 }
 
 export interface Message {

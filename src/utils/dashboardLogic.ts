@@ -71,6 +71,8 @@ export interface ChatSession {
   updatedAt: string;
   messages: ChatMessage[];
   starred?: boolean;
+  archivedAt?: string | null;
+  deletedAt?: string | null;
 }
 
 export interface ModelParameters {
@@ -81,11 +83,11 @@ export interface ModelParameters {
 }
 
 export const INITIAL_CHAT_LISTS: ChatListCategory[] = [
-  { id: 'favorites', label: 'Избранное', colorHex: '#F59E0B', isStar: true, count: 3 },
-  { id: 'code', label: 'Код', colorHex: '#4A90E2', count: 5 },
-  { id: 'marketing', label: 'Маркетинг', colorHex: '#34C759', count: 4 },
-  { id: 'archive', label: 'Архив', colorHex: '#EF4444', count: 8 },
-  { id: 'deleted', label: 'Удалённые', colorHex: '#F97316', count: 2 },
+  { id: 'favorites', label: 'Избранное', colorHex: '#F59E0B', isStar: true, count: 0 },
+  { id: 'code', label: 'Код', colorHex: '#4A90E2', count: 0 },
+  { id: 'marketing', label: 'Маркетинг', colorHex: '#34C759', count: 0 },
+  { id: 'archive', label: 'Архив', colorHex: '#EF4444', count: 0 },
+  { id: 'deleted', label: 'Удалённые', colorHex: '#F97316', count: 0 },
 ];
 
 export const QUICK_PROMPTS: QuickPrompt[] = [
@@ -394,6 +396,128 @@ export function createCustomChatList(
   };
 }
 
+export function isSessionDeleted(session: ChatSession): boolean {
+  return Boolean(session.deletedAt);
+}
+
+export function isSessionArchived(session: ChatSession): boolean {
+  return !session.deletedAt && Boolean(session.archivedAt);
+}
+
+export function isSessionActive(session: ChatSession): boolean {
+  return !session.deletedAt && !session.archivedAt;
+}
+
+/**
+ * Returns deduplicated chat sessions belonging to a specific sidebar category (or all active chats when categoryId is null).
+ */
+export function getSessionsForCategory(
+  sessions: ChatSession[],
+  categoryId: string | null
+): ChatSession[] {
+  const unique = deduplicateSessions(sessions);
+  if (categoryId === 'deleted') {
+    return unique.filter(isSessionDeleted);
+  }
+  if (categoryId === 'archive') {
+    return unique.filter(isSessionArchived);
+  }
+  if (categoryId === 'favorites') {
+    return unique.filter(
+      (s) => isSessionActive(s) && Boolean(s.starred || s.categoryId === 'favorites')
+    );
+  }
+  if (categoryId) {
+    return unique.filter((s) => isSessionActive(s) && s.categoryId === categoryId);
+  }
+  return unique.filter(isSessionActive);
+}
+
+/**
+ * Recomputes chat list category counts directly from the live sessions array so counters never drift from actual items.
+ */
+export function computeChatListCategories(
+  chatLists: ChatListCategory[],
+  sessions: ChatSession[]
+): ChatListCategory[] {
+  return chatLists.map((list) => ({
+    ...list,
+    count: getSessionsForCategory(sessions, list.id).length,
+  }));
+}
+
+export function archiveSessionInList(
+  sessions: ChatSession[],
+  sessionId: string,
+  archivedAtIso: string = new Date().toISOString()
+): ChatSession[] {
+  return sessions.map((s) =>
+    s.id === sessionId && !s.deletedAt ? { ...s, archivedAt: s.archivedAt || archivedAtIso } : s
+  );
+}
+
+export function unarchiveSessionInList(
+  sessions: ChatSession[],
+  sessionId: string
+): ChatSession[] {
+  return sessions.map((s) =>
+    s.id === sessionId ? { ...s, archivedAt: null } : s
+  );
+}
+
+export function softDeleteSessionInList(
+  sessions: ChatSession[],
+  sessionId: string,
+  deletedAtIso: string = new Date().toISOString()
+): ChatSession[] {
+  return sessions.map((s) =>
+    s.id === sessionId ? { ...s, deletedAt: s.deletedAt || deletedAtIso } : s
+  );
+}
+
+export function restoreDeletedSessionInList(
+  sessions: ChatSession[],
+  sessionId: string
+): ChatSession[] {
+  return sessions.map((s) =>
+    s.id === sessionId ? { ...s, deletedAt: null } : s
+  );
+}
+
+export function permanentlyDeleteSessionInList(
+  sessions: ChatSession[],
+  sessionId: string
+): ChatSession[] {
+  return sessions.filter((s) => s.id !== sessionId);
+}
+
+/**
+ * Returns safe initial state for the Admin Panel.
+ * In production mode (isDemoMode === false), never seeds mock/demo users or fake usage numbers.
+ */
+export function getInitialAdminPanelState<TUser, TUsage>(params: {
+  isDemoMode: boolean;
+  persistedAdminUsers: TUser[];
+  demoUsage: TUsage;
+}): {
+  users: TUser[];
+  usage: TUsage | null;
+  loaded: boolean;
+} {
+  if (params.isDemoMode) {
+    return {
+      users: params.persistedAdminUsers,
+      usage: params.demoUsage,
+      loaded: true,
+    };
+  }
+  return {
+    users: [],
+    usage: null,
+    loaded: false,
+  };
+}
+
 /**
  * Filters chat sessions, templates, and documents by a search query and optional category ID.
  */
@@ -412,11 +536,8 @@ export function filterWorkspaceContent(params: {
   const normalizedQuery = params.query.trim().toLowerCase();
   const categoryId = params.categoryId ?? null;
 
-  const filteredSessions = params.sessions.filter((session) => {
-    const matchesCategory =
-      !categoryId ||
-      (categoryId === 'favorites' ? Boolean(session.starred || session.categoryId === 'favorites') : session.categoryId === categoryId);
-    if (!matchesCategory) return false;
+  const baseSessions = getSessionsForCategory(params.sessions, categoryId);
+  const filteredSessions = baseSessions.filter((session) => {
     if (!normalizedQuery) return true;
     const inTitle = session.title.toLowerCase().includes(normalizedQuery);
     const inMessages = session.messages.some((m) => m.content.toLowerCase().includes(normalizedQuery));
@@ -702,6 +823,8 @@ export function mapBackendConversationToSession(
     title: string | null;
     created_at: string;
     last_message_at: string | null;
+    archived_at?: string | null;
+    deleted_at?: string | null;
     messages?: Array<{
       id: number;
       conversation_id: number;
@@ -739,6 +862,8 @@ export function mapBackendConversationToSession(
     categoryId: existingSession?.categoryId ?? 'code',
     updatedAt: formatTimestampShort(conv.last_message_at || conv.created_at),
     starred: existingSession?.starred ?? false,
+    archivedAt: conv.archived_at ?? null,
+    deletedAt: conv.deleted_at ?? null,
     messages: mappedMessages,
   };
 }
@@ -942,8 +1067,14 @@ export function deserializeWorkspaceState(
     const demoRole: 'admin' | 'user' = parsed.demoRole === 'admin' ? 'admin' : 'user';
     const isDemoMode = Boolean(parsed.isDemoMode);
     const sessions = Array.isArray(parsed.sessions)
-      ? sanitizePersistedSessions(parsed.sessions)
-      : INITIAL_SESSIONS;
+      ? sanitizePersistedSessions(parsed.sessions).map((s) => ({
+          ...s,
+          archivedAt: typeof s.archivedAt === 'string' ? s.archivedAt : null,
+          deletedAt: typeof s.deletedAt === 'string' ? s.deletedAt : null,
+        }))
+      : isDemoMode
+        ? INITIAL_SESSIONS
+        : [];
 
     const validNavs: NavSectionId[] = [
       'chats',
@@ -964,19 +1095,22 @@ export function deserializeWorkspaceState(
 
     const activeSessionId =
       typeof parsed.activeSessionId === 'string' &&
-      sessions.some((s) => s.id === parsed.activeSessionId)
+      sessions.some((s) => s.id === parsed.activeSessionId && !s.deletedAt)
         ? parsed.activeSessionId
         : null;
 
-    const chatLists =
+    const rawChatLists =
       Array.isArray(parsed.chatLists) && parsed.chatLists.length > 0
         ? parsed.chatLists
         : INITIAL_CHAT_LISTS;
+    const chatLists = computeChatListCategories(rawChatLists, sessions);
 
     const adminUsers =
-      Array.isArray(parsed.adminUsers) && parsed.adminUsers.length > 0
+      isDemoMode && Array.isArray(parsed.adminUsers) && parsed.adminUsers.length > 0
         ? parsed.adminUsers
-        : DEFAULT_ADMIN_USERS;
+        : isDemoMode
+          ? DEFAULT_ADMIN_USERS
+          : [];
 
     const modelParams =
       parsed.modelParams && validateModelParameters(parsed.modelParams).valid
