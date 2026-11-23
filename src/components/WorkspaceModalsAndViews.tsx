@@ -19,6 +19,11 @@ import {
   RotateCcw,
   Trash2,
   AlertCircle,
+  UserPlus,
+  UserX,
+  UserCheck,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 import {
   ChatSession,
@@ -30,8 +35,12 @@ import {
   PromptTemplate,
   applyQuotaLimitChange,
   canConfigureQuotas,
+  canToggleUserActiveStatus,
   deduplicateSessions,
+  formatUserAccountStatus,
+  formatUserRoleLabel,
   getInitialAdminPanelState,
+  validateAdminCreateUserInput,
   validateModelParameters,
   validateProfileUpdate,
 } from '../utils/dashboardLogic';
@@ -66,8 +75,8 @@ interface SecondaryViewProps {
   persistedAdminUsers?: AdminUserRecord[];
   onUpdateAdminUsers?: (
     updatedUsers: AdminUserRecord[],
-    targetUserId: number,
-    updatedQuotas: QuotaLimits
+    targetUserId?: number,
+    updatedQuotas?: QuotaLimits
   ) => void;
   streamDiagnostics?: StreamMetrics[];
 }
@@ -131,6 +140,17 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
     Record<number, { daily: string; monthly: string }>
   >({});
   const [quotaSaveMessage, setQuotaSaveMessage] = useState<string | null>(null);
+  const [createUserFormOpen, setCreateUserFormOpen] = useState(false);
+  const [createUserName, setCreateUserName] = useState('');
+  const [createUserEmail, setCreateUserEmail] = useState('');
+  const [createUserPassword, setCreateUserPassword] = useState('');
+  const [showCreatePassword, setShowCreatePassword] = useState(false);
+  const [createUserRole, setCreateUserRole] = useState<'employee' | 'admin'>('employee');
+  const [createUserDaily, setCreateUserDaily] = useState('20');
+  const [createUserMonthly, setCreateUserMonthly] = useState('500');
+  const [createUserError, setCreateUserError] = useState<string | null>(null);
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [togglingUserId, setTogglingUserId] = useState<number | null>(null);
 
   const syncDraftsFromUsers = (usersList: AdminUserRecord[]) => {
     const drafts: Record<number, { daily: string; monthly: string }> = {};
@@ -141,6 +161,17 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
       };
     }
     setQuotaDrafts(drafts);
+  };
+
+  const resetCreateUserForm = () => {
+    setCreateUserName('');
+    setCreateUserEmail('');
+    setCreateUserPassword('');
+    setShowCreatePassword(false);
+    setCreateUserRole('employee');
+    setCreateUserDaily('20');
+    setCreateUserMonthly('500');
+    setCreateUserError(null);
   };
 
   const loadAdminData = async () => {
@@ -243,6 +274,140 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
       setAdminError(
         err instanceof Error ? err.message : 'Ошибка обновления квот пользователя'
       );
+    }
+  };
+
+  const handleCreateUserSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin) return;
+
+    setCreateUserError(null);
+    setAdminError(null);
+    setQuotaSaveMessage(null);
+
+    const validation = validateAdminCreateUserInput({
+      name: createUserName,
+      email: createUserEmail,
+      password: createUserPassword,
+      role: createUserRole,
+      dailyInput: createUserDaily,
+      monthlyInput: createUserMonthly,
+      existingUsers: adminUsers,
+    });
+
+    if (!validation.ok) {
+      setCreateUserError(validation.error);
+      return;
+    }
+
+    const { name, email, password, role, dailyLimit, monthlyLimit } = validation.data;
+    setCreatingUser(true);
+
+    try {
+      if (isDemoMode) {
+        const maxId = adminUsers.reduce((max, u) => Math.max(max, u.id), 0);
+        const createdRecord: AdminUserRecord = {
+          id: maxId + 1,
+          name,
+          email,
+          role,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          quotas: {
+            daily: { used: 0, limit: dailyLimit },
+            monthly: { used: 0, limit: monthlyLimit },
+          },
+        };
+        const nextUsers = [...adminUsers, createdRecord];
+        setAdminUsers(nextUsers);
+        syncDraftsFromUsers(nextUsers);
+        onUpdateAdminUsers?.(nextUsers, createdRecord.id, createdRecord.quotas);
+        resetCreateUserForm();
+        setCreateUserFormOpen(false);
+        setQuotaSaveMessage(`Пользователь ${createdRecord.email} создан`);
+        return;
+      }
+
+      const created = await adminApi.createUser({ name, email, password, role });
+      let assignedQuotas: QuotaLimits = {
+        daily: { used: 0, limit: dailyLimit },
+        monthly: { used: 0, limit: monthlyLimit },
+      };
+
+      if (dailyLimit !== null || monthlyLimit !== null) {
+        const quotaRes = await adminApi.setUserQuotas(created.id, dailyLimit, monthlyLimit);
+        assignedQuotas = quotaRes.quotas;
+      }
+
+      const createdRecord: AdminUserRecord = {
+        id: created.id,
+        name: created.name,
+        email: created.email,
+        role: created.role,
+        is_active: created.is_active !== false,
+        created_at: created.created_at,
+        quotas: assignedQuotas,
+      };
+      const nextUsers = [...adminUsers, createdRecord];
+      setAdminUsers(nextUsers);
+      syncDraftsFromUsers(nextUsers);
+      onUpdateAdminUsers?.(nextUsers, createdRecord.id, assignedQuotas);
+      resetCreateUserForm();
+      setCreateUserFormOpen(false);
+      setQuotaSaveMessage(`Пользователь ${createdRecord.email} создан`);
+    } catch (err) {
+      setCreateUserError(
+        err instanceof Error ? err.message : 'Не удалось создать пользователя.'
+      );
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleToggleUserActive = async (targetUser: AdminUserRecord) => {
+    const guard = canToggleUserActiveStatus(user, targetUser.id);
+    if (!guard.allowed) {
+      setAdminError(guard.reason);
+      return;
+    }
+
+    const nextActive = targetUser.is_active === false;
+    setAdminError(null);
+    setQuotaSaveMessage(null);
+    setTogglingUserId(targetUser.id);
+
+    try {
+      if (isDemoMode) {
+        const nextUsers = adminUsers.map((u) =>
+          u.id === targetUser.id ? { ...u, is_active: nextActive } : u
+        );
+        setAdminUsers(nextUsers);
+        onUpdateAdminUsers?.(nextUsers);
+        setQuotaSaveMessage(
+          nextActive
+            ? `Учётная запись ${targetUser.email} разблокирована`
+            : `Учётная запись ${targetUser.email} заблокирована`
+        );
+        return;
+      }
+
+      const updated = await adminApi.updateUser(targetUser.id, { is_active: nextActive });
+      const nextUsers = adminUsers.map((u) =>
+        u.id === targetUser.id ? { ...u, is_active: updated.is_active } : u
+      );
+      setAdminUsers(nextUsers);
+      onUpdateAdminUsers?.(nextUsers);
+      setQuotaSaveMessage(
+        updated.is_active
+          ? `Учётная запись ${targetUser.email} разблокирована`
+          : `Учётная запись ${targetUser.email} заблокирована`
+      );
+    } catch (err) {
+      setAdminError(
+        err instanceof Error ? err.message : 'Не удалось изменить статус учётной записи.'
+      );
+    } finally {
+      setTogglingUserId(null);
     }
   };
 
@@ -408,18 +573,18 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
 
   if (activeNav === 'admin') {
     return (
-      <section aria-label="Панель администратора" className="max-w-[960px] mx-auto w-full px-6 py-8 space-y-6">
+      <section aria-label="Панель администратора" className="max-w-[1160px] mx-auto w-full px-6 py-8 space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <h2 className="text-[20px] font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
               <Shield className="w-5 h-5 text-indigo-600 dark:text-indigo-400" aria-hidden="true" />
-              <span>Администрирование и управление квотами</span>
+              <span>Администрирование и управление пользователями</span>
             </h2>
             <p className="text-[13.5px] text-slate-600 dark:text-slate-400 mt-1">
-              Настройка дневных и месячных лимитов запросов сотрудников (доступно только администратору).
+              Создание учётных записей, управление доступом и настройка квот запросов сотрудников (доступно только администратору).
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={loadAdminData}
@@ -477,10 +642,10 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
           >
             <RefreshCw className="w-6 h-6 text-indigo-600 dark:text-indigo-400 animate-spin" aria-hidden="true" />
             <div className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
-              Загрузка статистики и квот пользователей...
+              Загрузка статистики и списка пользователей...
             </div>
             <p className="text-[12.5px] text-slate-500 dark:text-slate-400">
-              Получаем актуальные данные из базы PostgreSQL.
+              Получаем актуальные данные учётных записей и квот.
             </p>
           </div>
         )}
@@ -524,96 +689,358 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
           </div>
         )}
 
-        {/* Users & Quotas Table (rendered only after real data loads or in demo mode) */}
+        {/* Section «Пользователи»: Create user, assign employee role & limits, block/unblock, edit quotas */}
         {(isDemoMode || adminLoaded) && (
           <div className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
-                  <th className="py-3 px-4">Пользователь</th>
-                  <th className="py-3 px-4">Роль</th>
-                  <th className="py-3 px-4">Дневной лимит (исп. / лимит)</th>
-                  <th className="py-3 px-4">Месячный лимит (исп. / лимит)</th>
-                  <th className="py-3 px-4 text-right">Действие</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
-                {adminUsers.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-6 px-4 text-center text-[13px] text-slate-500 dark:text-slate-400">
-                      Пользователи в системе не найдены.
-                    </td>
-                  </tr>
-                ) : (
-                  adminUsers.map((u) => {
-                    const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
-                    return (
-                      <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
-                        <td className="py-3.5 px-4 font-semibold text-slate-900 dark:text-slate-100">
-                          {u.email}
-                        </td>
-                        <td className="py-3.5 px-4 text-[13px] text-slate-600 dark:text-slate-300">
-                          {u.role === 'admin' ? 'Администратор' : 'Сотрудник'}
-                        </td>
-                        <td className="py-3.5 px-4 tabular-nums">
-                          <div className="flex items-center gap-2">
-                            <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
-                              {u.quotas.daily.used} /
-                            </span>
-                            <input
-                              type="number"
-                              min="0"
-                              aria-label={`Дневной лимит для ${u.email}`}
-                              value={draft.daily}
-                              onChange={(e) =>
-                                setQuotaDrafts((prev) => ({
-                                  ...prev,
-                                  [u.id]: { ...draft, daily: e.target.value },
-                                }))
-                              }
-                              placeholder="Без лимита"
-                              className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
-                            />
-                          </div>
-                        </td>
-                        <td className="py-3.5 px-4 tabular-nums">
-                          <div className="flex items-center gap-2">
-                            <span className="text-slate-500 dark:text-slate-400 text-[12.5px]">
-                              {u.quotas.monthly.used} /
-                            </span>
-                            <input
-                              type="number"
-                              min="0"
-                              aria-label={`Месячный лимит для ${u.email}`}
-                              value={draft.monthly}
-                              onChange={(e) =>
-                                setQuotaDrafts((prev) => ({
-                                  ...prev,
-                                  [u.id]: { ...draft, monthly: e.target.value },
-                                }))
-                              }
-                              placeholder="Без лимита"
-                              className="focus-ring w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
-                            />
-                          </div>
-                        </td>
-                        <td className="py-3.5 px-4 text-right">
-                          <button
-                            type="button"
-                            onClick={() => handleSaveUserQuota(u.id)}
-                            aria-label={`Сохранить квоты для ${u.email}`}
-                            className="focus-ring inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12.5px] font-semibold"
-                          >
-                            <Save className="w-3.5 h-3.5" aria-hidden="true" />
-                            <span>Сохранить</span>
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })
+            <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex-1 min-w-[260px]">
+                <h3 className="text-[15.5px] font-bold text-slate-900 dark:text-slate-100">
+                  Пользователи
+                </h3>
+                <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  Закрытая корпоративная регистрация: добавляйте сотрудников, настраивайте квоты и управляйте блокировкой доступа.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (createUserFormOpen) {
+                    setCreateUserFormOpen(false);
+                    setCreateUserError(null);
+                  } else {
+                    setCreateUserFormOpen(true);
+                    setCreateUserError(null);
+                  }
+                }}
+                aria-expanded={createUserFormOpen}
+                className="focus-ring shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#4F46E5] hover:bg-[#4338CA] text-white text-[13px] font-semibold transition-colors"
+              >
+                <UserPlus className="w-4 h-4" aria-hidden="true" />
+                <span>{createUserFormOpen ? 'Скрыть форму' : 'Создать пользователя'}</span>
+              </button>
+            </div>
+
+            {createUserFormOpen && (
+              <form
+                onSubmit={handleCreateUserSubmit}
+                aria-label="Создание нового пользователя"
+                className="p-5 border-b border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-[#0E1322]/70 space-y-4"
+                noValidate
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  <div>
+                    <label
+                      htmlFor="admin-create-name"
+                      className="block text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                    >
+                      Имя сотрудника
+                    </label>
+                    <input
+                      id="admin-create-name"
+                      type="text"
+                      value={createUserName}
+                      onChange={(e) => {
+                        setCreateUserName(e.target.value);
+                        if (createUserError) setCreateUserError(null);
+                      }}
+                      placeholder="Айдар Сериков"
+                      disabled={creatingUser}
+                      className="focus-ring w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] text-[13.5px] text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="admin-create-email"
+                      className="block text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                    >
+                      Корпоративный Email
+                    </label>
+                    <input
+                      id="admin-create-email"
+                      type="email"
+                      value={createUserEmail}
+                      onChange={(e) => {
+                        setCreateUserEmail(e.target.value);
+                        if (createUserError) setCreateUserError(null);
+                      }}
+                      placeholder="user@company.kz"
+                      disabled={creatingUser}
+                      className="focus-ring w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] text-[13.5px] text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="admin-create-password"
+                      className="block text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                    >
+                      Временный пароль (мин. 8 симв.)
+                    </label>
+                    <div className="relative flex items-center">
+                      <input
+                        id="admin-create-password"
+                        type={showCreatePassword ? 'text' : 'password'}
+                        value={createUserPassword}
+                        onChange={(e) => {
+                          setCreateUserPassword(e.target.value);
+                          if (createUserError) setCreateUserError(null);
+                        }}
+                        placeholder="Минимум 8 символов"
+                        disabled={creatingUser}
+                        className="focus-ring w-full h-10 pl-3 pr-9 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] text-[13.5px] text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowCreatePassword((prev) => !prev)}
+                        aria-label={showCreatePassword ? 'Скрыть временный пароль' : 'Показать временный пароль'}
+                        className="focus-ring absolute right-2 p-1 rounded-lg text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+                      >
+                        {showCreatePassword ? (
+                          <EyeOff className="w-4 h-4" aria-hidden="true" />
+                        ) : (
+                          <Eye className="w-4 h-4" aria-hidden="true" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="admin-create-role"
+                      className="block text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                    >
+                      Роль в системе
+                    </label>
+                    <select
+                      id="admin-create-role"
+                      value={createUserRole}
+                      onChange={(e) =>
+                        setCreateUserRole(e.target.value === 'admin' ? 'admin' : 'employee')
+                      }
+                      disabled={creatingUser}
+                      className="focus-ring w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] text-[13.5px] text-slate-900 dark:text-slate-100"
+                    >
+                      <option value="employee">Сотрудник (employee)</option>
+                      <option value="admin">Администратор (admin)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="admin-create-daily"
+                      className="block text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                    >
+                      Дневной лимит запросов
+                    </label>
+                    <input
+                      id="admin-create-daily"
+                      type="number"
+                      min="0"
+                      value={createUserDaily}
+                      onChange={(e) => {
+                        setCreateUserDaily(e.target.value);
+                        if (createUserError) setCreateUserError(null);
+                      }}
+                      placeholder="Без лимита"
+                      disabled={creatingUser}
+                      className="focus-ring w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] text-[13.5px] text-slate-900 dark:text-slate-100 tabular-nums"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="admin-create-monthly"
+                      className="block text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 mb-1"
+                    >
+                      Месячный лимит запросов
+                    </label>
+                    <input
+                      id="admin-create-monthly"
+                      type="number"
+                      min="0"
+                      value={createUserMonthly}
+                      onChange={(e) => {
+                        setCreateUserMonthly(e.target.value);
+                        if (createUserError) setCreateUserError(null);
+                      }}
+                      placeholder="Без лимита"
+                      disabled={creatingUser}
+                      className="focus-ring w-full h-10 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131829] text-[13.5px] text-slate-900 dark:text-slate-100 tabular-nums"
+                    />
+                  </div>
+                </div>
+
+                {createUserError && (
+                  <div
+                    role="alert"
+                    className="p-3 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[12.5px] text-red-700 dark:text-red-300 flex items-center gap-2"
+                  >
+                    <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>{createUserError}</span>
+                  </div>
                 )}
-              </tbody>
-            </table>
+
+                <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetCreateUserForm();
+                      setCreateUserFormOpen(false);
+                    }}
+                    disabled={creatingUser}
+                    className="focus-ring px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[13px] font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={creatingUser}
+                    className="focus-ring inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#4F46E5] hover:bg-[#4338CA] disabled:opacity-60 text-white text-[13px] font-semibold transition-colors"
+                  >
+                    <UserPlus className="w-4 h-4" aria-hidden="true" />
+                    <span>{creatingUser ? 'Создание...' : 'Создать учётную запись'}</span>
+                  </button>
+                </div>
+              </form>
+            )}
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-800 text-[12px] font-semibold text-slate-500 dark:text-slate-400">
+                    <th className="py-3 px-2.5 first:pl-4">Пользователь</th>
+                    <th className="py-3 px-2.5 whitespace-nowrap">Роль</th>
+                    <th className="py-3 px-2.5 whitespace-nowrap">Статус</th>
+                    <th className="py-3 px-2.5 whitespace-nowrap">Дневной лимит</th>
+                    <th className="py-3 px-2.5 whitespace-nowrap">Месячный лимит</th>
+                    <th className="py-3 px-2.5 last:pr-4 text-right whitespace-nowrap">Действия</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800 text-[13.5px]">
+                  {adminUsers.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-6 px-4 text-center text-[13px] text-slate-500 dark:text-slate-400">
+                        Пользователи в системе не найдены.
+                      </td>
+                    </tr>
+                  ) : (
+                    adminUsers.map((u) => {
+                      const draft = quotaDrafts[u.id] ?? { daily: '', monthly: '' };
+                      const isUserActive = u.is_active !== false;
+                      const isSelf = user?.id === u.id;
+                      const isToggling = togglingUserId === u.id;
+                      return (
+                        <tr key={u.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-800/40">
+                          <td className="py-3.5 px-2.5 first:pl-4 min-w-[145px]">
+                            <div className="font-semibold text-slate-900 dark:text-slate-100">
+                              {u.name || u.email}
+                            </div>
+                            <div className="text-[12px] text-slate-500 dark:text-slate-400">
+                              {u.email}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-2.5 text-[13px] text-slate-600 dark:text-slate-300 whitespace-nowrap">
+                            {formatUserRoleLabel(u.role)}
+                          </td>
+                          <td className="py-3.5 px-2.5 text-[13px] font-medium whitespace-nowrap">
+                            <span
+                              className={
+                                isUserActive
+                                  ? 'text-emerald-700 dark:text-emerald-300'
+                                  : 'text-red-700 dark:text-red-300'
+                              }
+                            >
+                              {formatUserAccountStatus(u.is_active)}
+                            </span>
+                          </td>
+                          <td className="py-3.5 px-2.5 tabular-nums whitespace-nowrap">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-slate-500 dark:text-slate-400 text-[12.5px] whitespace-nowrap">
+                                {u.quotas.daily.used} /
+                              </span>
+                              <input
+                                type="number"
+                                min="0"
+                                aria-label={`Дневной лимит для ${u.email}`}
+                                value={draft.daily}
+                                onChange={(e) =>
+                                  setQuotaDrafts((prev) => ({
+                                    ...prev,
+                                    [u.id]: { ...draft, daily: e.target.value },
+                                  }))
+                                }
+                                placeholder="Без лим."
+                                className="focus-ring w-[68px] px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+                              />
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-2.5 tabular-nums whitespace-nowrap">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-slate-500 dark:text-slate-400 text-[12.5px] whitespace-nowrap">
+                                {u.quotas.monthly.used} /
+                              </span>
+                              <input
+                                type="number"
+                                min="0"
+                                aria-label={`Месячный лимит для ${u.email}`}
+                                value={draft.monthly}
+                                onChange={(e) =>
+                                  setQuotaDrafts((prev) => ({
+                                    ...prev,
+                                    [u.id]: { ...draft, monthly: e.target.value },
+                                  }))
+                                }
+                                placeholder="Без лим."
+                                className="focus-ring w-[68px] px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-[13px] text-slate-900 dark:text-slate-100"
+                              />
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-2.5 last:pr-4 text-right whitespace-nowrap">
+                            <div className="inline-flex items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleSaveUserQuota(u.id)}
+                                aria-label={`Сохранить квоты для ${u.email}`}
+                                className="focus-ring inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#5046E5] hover:bg-[#4338CA] text-white text-[12px] font-semibold whitespace-nowrap"
+                              >
+                                <Save className="w-3.5 h-3.5" aria-hidden="true" />
+                                <span>Сохранить</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleUserActive(u)}
+                                disabled={isSelf || isToggling}
+                                title={
+                                  isSelf
+                                    ? 'Нельзя заблокировать собственную учётную запись'
+                                    : isUserActive
+                                      ? 'Заблокировать доступ пользователя'
+                                      : 'Разблокировать доступ пользователя'
+                                }
+                                aria-label={`${isUserActive ? 'Заблокировать' : 'Разблокировать'} пользователя ${u.email}`}
+                                className={`focus-ring inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl border text-[12px] font-semibold whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed ${
+                                  isUserActive
+                                    ? 'border-red-200 dark:border-red-900/60 text-red-700 dark:text-red-300 enabled:hover:bg-red-50 dark:enabled:hover:bg-red-950/40'
+                                    : 'border-emerald-200 dark:border-emerald-900/60 text-emerald-700 dark:text-emerald-300 enabled:hover:bg-emerald-50 dark:enabled:hover:bg-emerald-950/40'
+                                }`}
+                              >
+                                {isUserActive ? (
+                                  <UserX className="w-3.5 h-3.5" aria-hidden="true" />
+                                ) : (
+                                  <UserCheck className="w-3.5 h-3.5" aria-hidden="true" />
+                                )}
+                                <span>{isUserActive ? 'Заблокировать' : 'Разблокировать'}</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 

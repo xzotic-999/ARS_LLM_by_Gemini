@@ -892,6 +892,7 @@ export interface QuotaUpdateTargetUser {
   email: string;
   name?: string;
   role: 'user' | 'employee' | 'admin';
+  is_active?: boolean;
   created_at: string;
   quotas: {
     daily: { used: number; limit: number | null };
@@ -941,6 +942,13 @@ export function applyQuotaLimitChange(params: {
     };
   }
 
+  if (dailyLimit !== null && monthlyLimit !== null && monthlyLimit < dailyLimit) {
+    return {
+      ok: false,
+      error: 'Месячный лимит не может быть меньше дневного лимита.',
+    };
+  }
+
   const target = params.users.find((u) => u.id === params.targetUserId);
   if (!target) {
     return { ok: false, error: 'Пользователь не найден.' };
@@ -960,6 +968,144 @@ export function applyQuotaLimitChange(params: {
     users: updatedUsers,
     updatedQuotas,
   };
+}
+
+export interface AdminCreateUserInput {
+  name: string;
+  email: string;
+  password: string;
+  role: string;
+  dailyInput: string;
+  monthlyInput: string;
+  existingUsers?: Array<{ email: string }>;
+}
+
+export type AdminCreateUserValidationResult =
+  | {
+      ok: true;
+      data: {
+        name: string;
+        email: string;
+        password: string;
+        role: 'employee' | 'admin';
+        dailyLimit: number | null;
+        monthlyLimit: number | null;
+      };
+    }
+  | { ok: false; error: string };
+
+/**
+ * Validates admin user creation form fields (name, corporate email, temporary password, role, quotas).
+ * Self-registration is strictly disabled; only admins can create corporate accounts.
+ */
+export function validateAdminCreateUserInput(
+  input: AdminCreateUserInput
+): AdminCreateUserValidationResult {
+  const name = (input.name ?? '').trim();
+  if (!name) {
+    return { ok: false, error: 'Укажите имя и фамилию сотрудника.' };
+  }
+  if (name.length > 120) {
+    return { ok: false, error: 'Имя сотрудника не должно превышать 120 символов.' };
+  }
+
+  const email = (input.email ?? '').trim().toLowerCase();
+  if (!email || email.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { ok: false, error: 'Укажите корректный корпоративный Email.' };
+  }
+
+  if (
+    Array.isArray(input.existingUsers) &&
+    input.existingUsers.some((u) => u.email.trim().toLowerCase() === email)
+  ) {
+    return {
+      ok: false,
+      error: 'Пользователь с таким корпоративным Email уже существует.',
+    };
+  }
+
+  const password = input.password ?? '';
+  if (password.length < 8) {
+    return {
+      ok: false,
+      error: 'Временный пароль должен содержать не менее 8 символов.',
+    };
+  }
+  if (password.length > 128) {
+    return {
+      ok: false,
+      error: 'Временный пароль не должен превышать 128 символов.',
+    };
+  }
+
+  const normalizedRole = input.role === 'admin' ? 'admin' : input.role === 'employee' ? 'employee' : null;
+  if (!normalizedRole) {
+    return { ok: false, error: 'Выберите допустимую роль пользователя.' };
+  }
+
+  const dailyTrimmed = (input.dailyInput ?? '').trim();
+  const monthlyTrimmed = (input.monthlyInput ?? '').trim();
+  const dailyLimit = dailyTrimmed === '' ? null : Number(dailyTrimmed);
+  const monthlyLimit = monthlyTrimmed === '' ? null : Number(monthlyTrimmed);
+
+  if (
+    (dailyLimit !== null && (!Number.isInteger(dailyLimit) || dailyLimit < 0)) ||
+    (monthlyLimit !== null && (!Number.isInteger(monthlyLimit) || monthlyLimit < 0))
+  ) {
+    return {
+      ok: false,
+      error: 'Дневной и месячный лимиты должны быть целыми неотрицательными числами (или пустыми).',
+    };
+  }
+
+  if (dailyLimit !== null && monthlyLimit !== null && monthlyLimit < dailyLimit) {
+    return {
+      ok: false,
+      error: 'Месячный лимит не может быть меньше дневного лимита.',
+    };
+  }
+
+  return {
+    ok: true,
+    data: {
+      name,
+      email,
+      password,
+      role: normalizedRole,
+      dailyLimit,
+      monthlyLimit,
+    },
+  };
+}
+
+/**
+ * Checks whether an actor is allowed to block/unblock a target user account.
+ */
+export function canToggleUserActiveStatus(
+  actor: { id?: number | null; role?: string | null } | null | undefined,
+  targetUserId: number
+): { allowed: true } | { allowed: false; reason: string } {
+  if (!canConfigureQuotas(actor)) {
+    return {
+      allowed: false,
+      reason: 'Недостаточно прав: блокировать пользователей может только администратор.',
+    };
+  }
+  if (actor?.id === targetUserId) {
+    return {
+      allowed: false,
+      reason: 'Нельзя заблокировать собственную учётную запись администратора.',
+    };
+  }
+  return { allowed: true };
+}
+
+export function formatUserRoleLabel(role: string): string {
+  return role === 'admin' ? 'Администратор' : 'Сотрудник';
+}
+
+export function formatUserAccountStatus(isActive?: boolean): string {
+  return isActive === false ? 'Заблокирована' : 'Активна';
 }
 
 export interface PersistedWorkspaceState {
@@ -986,6 +1132,7 @@ export const DEFAULT_ADMIN_USERS: QuotaUpdateTargetUser[] = [
     email: 'admin@ars_llm.local',
     name: 'Администратор ИТ',
     role: 'admin',
+    is_active: true,
     created_at: '2026-10-01T08:00:00.000Z',
     quotas: { daily: { used: 4, limit: 100 }, monthly: { used: 38, limit: 2000 } },
   },
@@ -993,7 +1140,8 @@ export const DEFAULT_ADMIN_USERS: QuotaUpdateTargetUser[] = [
     id: 2,
     email: 'employee@company.kz',
     name: 'Сотрудник',
-    role: 'user',
+    role: 'employee',
+    is_active: true,
     created_at: '2026-10-05T09:30:00.000Z',
     quotas: { daily: { used: 4, limit: 20 }, monthly: { used: 38, limit: 500 } },
   },

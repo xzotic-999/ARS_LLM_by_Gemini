@@ -1282,6 +1282,133 @@ test('Admin Panel initial state and deserializeWorkspaceState never leak mock da
   assert.equal(restored.chatLists.find((l) => l.id === 'deleted')?.count, 1);
 });
 
+test('Admin user creation validation and block/unblock status guards enforce corporate security policies', async () => {
+  const {
+    validateAdminCreateUserInput,
+    canToggleUserActiveStatus,
+    formatUserRoleLabel,
+    formatUserAccountStatus,
+    applyQuotaLimitChange,
+    DEFAULT_ADMIN_USERS,
+  } = await import('./dashboardLogic');
+
+  // 1. Valid employee creation with daily/monthly quota limits
+  const validRes = validateAdminCreateUserInput({
+    name: '  Айдар Сериков  ',
+    email: '  Aidar.Serikov@Company.KZ  ',
+    password: 'TempPass#2026',
+    role: 'employee',
+    dailyInput: '25',
+    monthlyInput: '500',
+    existingUsers: DEFAULT_ADMIN_USERS,
+  });
+  assert.equal(validRes.ok, true);
+  if (validRes.ok) {
+    assert.equal(validRes.data.name, 'Айдар Сериков');
+    assert.equal(validRes.data.email, 'aidar.serikov@company.kz');
+    assert.equal(validRes.data.role, 'employee');
+    assert.equal(validRes.data.dailyLimit, 25);
+    assert.equal(validRes.data.monthlyLimit, 500);
+  }
+
+  // 2. Empty limits are accepted as null (unlimited)
+  const unlimitedRes = validateAdminCreateUserInput({
+    name: 'Инженер',
+    email: 'eng@company.kz',
+    password: 'StrongPassword1',
+    role: 'admin',
+    dailyInput: '',
+    monthlyInput: '',
+    existingUsers: DEFAULT_ADMIN_USERS,
+  });
+  assert.equal(unlimitedRes.ok, true);
+  if (unlimitedRes.ok) {
+    assert.equal(unlimitedRes.data.role, 'admin');
+    assert.equal(unlimitedRes.data.dailyLimit, null);
+    assert.equal(unlimitedRes.data.monthlyLimit, null);
+  }
+
+  // 3. Rejects missing name, invalid email, duplicate email, short password, and monthly < daily
+  assert.equal(
+    validateAdminCreateUserInput({
+      name: '  ',
+      email: 'new@company.kz',
+      password: 'Password123',
+      role: 'employee',
+      dailyInput: '10',
+      monthlyInput: '100',
+    }).ok,
+    false
+  );
+
+  assert.equal(
+    validateAdminCreateUserInput({
+      name: 'Новый',
+      email: 'not-an-email',
+      password: 'Password123',
+      role: 'employee',
+      dailyInput: '10',
+      monthlyInput: '100',
+    }).ok,
+    false
+  );
+
+  const dupRes = validateAdminCreateUserInput({
+    name: 'Дубликат',
+    email: 'EMPLOYEE@company.kz',
+    password: 'Password123',
+    role: 'employee',
+    dailyInput: '10',
+    monthlyInput: '100',
+    existingUsers: DEFAULT_ADMIN_USERS,
+  });
+  assert.equal(dupRes.ok, false);
+
+  const shortPassRes = validateAdminCreateUserInput({
+    name: 'Короткий',
+    email: 'short@company.kz',
+    password: '1234567',
+    role: 'employee',
+    dailyInput: '10',
+    monthlyInput: '100',
+  });
+  assert.equal(shortPassRes.ok, false);
+
+  const invertedQuotaRes = validateAdminCreateUserInput({
+    name: 'Лимит',
+    email: 'limit@company.kz',
+    password: 'Password123',
+    role: 'employee',
+    dailyInput: '50',
+    monthlyInput: '20',
+  });
+  assert.equal(invertedQuotaRes.ok, false);
+
+  const invertedQuotaUpdate = applyQuotaLimitChange({
+    actor: { role: 'admin' },
+    users: DEFAULT_ADMIN_USERS,
+    targetUserId: 2,
+    dailyInput: '100',
+    monthlyInput: '50',
+  });
+  assert.equal(invertedQuotaUpdate.ok, false);
+
+  // 4. Block / unblock guards
+  assert.equal(canToggleUserActiveStatus({ id: 1, role: 'admin' }, 2).allowed, true);
+  assert.equal(canToggleUserActiveStatus({ id: 1, role: 'admin' }, 1).allowed, false);
+  assert.equal(canToggleUserActiveStatus({ id: 2, role: 'employee' }, 1).allowed, false);
+  assert.equal(canToggleUserActiveStatus(null, 2).allowed, false);
+
+  // 5. Role & account status labels
+  assert.equal(formatUserRoleLabel('admin'), 'Администратор');
+  assert.equal(formatUserRoleLabel('employee'), 'Сотрудник');
+  assert.equal(formatUserRoleLabel('user'), 'Сотрудник');
+  assert.equal(formatUserAccountStatus(true), 'Активна');
+  assert.equal(formatUserAccountStatus(undefined), 'Активна');
+  assert.equal(formatUserAccountStatus(false), 'Заблокирована');
+});
+
+
 
 
 

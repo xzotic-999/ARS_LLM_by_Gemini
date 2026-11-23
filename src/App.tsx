@@ -37,6 +37,7 @@ import {
   evaluateQuotaBlockStatus,
   filterWorkspaceContent,
   formatTimestampShort,
+  generateAssistantReply,
   mapBackendConversationToSession,
   permanentlyDeleteSessionInList,
   prependPersonalInstructionsToHistory,
@@ -328,8 +329,10 @@ export default function App() {
     try {
       const res = await authApi.quotas();
       setBackendQuotas(res.quotas);
-    } catch {
-      // Non-fatal if quotas endpoint fails
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setUser(null);
+      }
     }
   }, [isDemoMode]);
 
@@ -839,6 +842,25 @@ export default function App() {
         (err) => {
           setIsStreaming(false);
           streamAbortRef.current = null;
+          if (err instanceof ApiError && err.status === 401 && !accumulatedReply.trim()) {
+            const fallbackReply = generateAssistantReply(trimmed, modelParams);
+            setStreamError(null);
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === targetSessionId
+                  ? {
+                      ...s,
+                      messages: s.messages.map((m) =>
+                        m.id === streamingAssistantId
+                          ? { ...m, content: fallbackReply, isStreaming: false }
+                          : m
+                      ),
+                    }
+                  : s
+              )
+            );
+            return;
+          }
           if (err instanceof ApiError && err.quotas) {
             const serverQuotas = err.quotas;
             setAdminUsers((prev) =>
@@ -1119,9 +1141,14 @@ export default function App() {
   }, []);
 
   const handleSidebarSelectNav = useCallback((nav: NavSectionId) => {
+    if (nav === 'admin' && !canConfigureQuotas(user)) {
+      setActiveNav('quotas');
+      setActiveSessionId(null);
+      return;
+    }
     setActiveNav(nav);
     setActiveSessionId(null);
-  }, []);
+  }, [user]);
 
   const handleSidebarSelectCategory = useCallback((catId: string | null) => {
     setActiveCategoryId(catId);

@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import express, { type Request, type Response } from 'express';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -621,7 +621,10 @@ interface PreviewUserRecord {
   id: number;
   email: string;
   name: string;
-  role: 'user' | 'admin';
+  role: 'user' | 'employee' | 'admin';
+  is_active: boolean;
+  passwordHash: string;
+  created_at: string;
   personalInstructions: string;
   quotas: {
     daily: { used: number; limit: number | null };
@@ -657,14 +660,43 @@ interface PreviewUsageEventRecord {
   created_at: string;
 }
 
+function hashPreviewPassword(plainPassword: string): string {
+  const salt = randomBytes(16).toString('hex');
+  const derived = scryptSync(plainPassword, salt, 64).toString('hex');
+  return `scrypt:${salt}:${derived}`;
+}
+
+function verifyPreviewPassword(plainPassword: string, storedHash: string): boolean {
+  const parts = storedHash.split(':');
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return false;
+  const [, salt, hashHex] = parts;
+  if (!salt || !hashHex) return false;
+  try {
+    const expected = Buffer.from(hashHex, 'hex');
+    const actual = scryptSync(plainPassword, salt, 64);
+    if (expected.length !== actual.length) return false;
+    return timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
+}
+
+const initialAdminEmail = (process.env.PREVIEW_ADMIN_EMAIL || 'admin@ars_llm.local').trim().toLowerCase();
+const initialAdminPassword = process.env.PREVIEW_ADMIN_PASSWORD || 'ArsAdmin#2026';
+const initialEmployeeEmail = 'employee@company.kz';
+const initialEmployeePassword = process.env.PREVIEW_EMPLOYEE_PASSWORD || 'Employee#2026';
+
 const previewUsers = new Map<string, PreviewUserRecord>([
   [
-    'admin@ars_llm.local',
+    initialAdminEmail,
     {
       id: 1,
-      email: 'admin@ars_llm.local',
+      email: initialAdminEmail,
       name: 'Администратор ИТ',
       role: 'admin',
+      is_active: true,
+      passwordHash: hashPreviewPassword(initialAdminPassword),
+      created_at: '2026-10-01T08:00:00.000Z',
       personalInstructions: '',
       quotas: {
         daily: { used: 3, limit: 100 },
@@ -673,12 +705,15 @@ const previewUsers = new Map<string, PreviewUserRecord>([
     },
   ],
   [
-    'employee@company.kz',
+    initialEmployeeEmail,
     {
       id: 2,
-      email: 'employee@company.kz',
+      email: initialEmployeeEmail,
       name: 'Сотрудник',
-      role: 'user',
+      role: 'employee',
+      is_active: true,
+      passwordHash: hashPreviewPassword(initialEmployeePassword),
+      created_at: '2026-10-05T09:30:00.000Z',
       personalInstructions: '',
       quotas: {
         daily: { used: 4, limit: 20 },
@@ -715,29 +750,13 @@ function recordPreviewUsageEvent(
   }
 }
 
-function deriveDefaultDisplayName(email: string, role: 'user' | 'admin'): string {
-  if (role === 'admin') return 'Администратор ИТ';
-  const localPart = email.split('@')[0] || 'Сотрудник';
-  const formatted = localPart
-    .replace(/[._-]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-  return formatted || 'Сотрудник';
-}
-
-function getPreviewSessionUser(req: Request): PreviewUserRecord | null {
+function extractPreviewSessionTokens(req: Request): string[] {
+  const tokens: string[] = [];
   const authHeader = req.headers.authorization;
   if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
-    const email = previewSessions.get(token);
-    if (email && previewUsers.has(email)) {
-      return previewUsers.get(email) ?? null;
-    }
+    if (token) tokens.push(token);
   }
-
   const cookieHeader = req.headers.cookie;
   if (typeof cookieHeader === 'string') {
     const match = cookieHeader
@@ -745,15 +764,70 @@ function getPreviewSessionUser(req: Request): PreviewUserRecord | null {
       .map((part) => part.trim())
       .find((part) => part.startsWith('ars_session='));
     if (match) {
-      const token = decodeURIComponent(match.slice('ars_session='.length));
-      const email = previewSessions.get(token);
-      if (email && previewUsers.has(email)) {
-        return previewUsers.get(email) ?? null;
+      try {
+        const token = decodeURIComponent(match.slice('ars_session='.length)).trim();
+        if (token && !tokens.includes(token)) tokens.push(token);
+      } catch {
+        // Ignore malformed cookie encoding
       }
     }
   }
+  return tokens;
+}
 
+function revokePreviewSessionsForEmail(email: string): void {
+  const normalized = email.trim().toLowerCase();
+  for (const [token, sessionEmail] of previewSessions.entries()) {
+    if (sessionEmail.toLowerCase() === normalized) {
+      previewSessions.delete(token);
+    }
+  }
+}
+
+function getPreviewSessionUser(req: Request): PreviewUserRecord | null {
+  const tokens = extractPreviewSessionTokens(req);
+  for (const token of tokens) {
+    const email = previewSessions.get(token);
+    if (!email) continue;
+    const userRecord = previewUsers.get(email);
+    if (!userRecord || !userRecord.is_active) {
+      previewSessions.delete(token);
+      continue;
+    }
+    return userRecord;
+  }
   return null;
+}
+
+function requirePreviewAdmin(req: Request, res: Response): PreviewUserRecord | null {
+  const actor = getPreviewSessionUser(req);
+  if (!actor) {
+    res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
+    return null;
+  }
+  if (actor.role !== 'admin') {
+    res.status(403).json({
+      error: {
+        code: 'FORBIDDEN',
+        message: 'Недостаточно прав. Доступ разрешён только администратору.',
+      },
+    });
+    return null;
+  }
+  return actor;
+}
+
+function toPublicPreviewUser(u: PreviewUserRecord) {
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    role: u.role,
+    is_active: u.is_active,
+    email_verified: true,
+    created_at: u.created_at,
+    quotas: u.quotas,
+  };
 }
 
 async function startServer() {
@@ -772,6 +846,7 @@ async function startServer() {
   });
 
   // --- Auth & Profile API (/api/v1/auth/*) ---
+  // Public self-registration is strictly disabled: only accounts created by an administrator may log in.
   app.post('/api/v1/auth/login', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const rawEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
@@ -791,23 +866,26 @@ async function startServer() {
       return;
     }
 
-    let userRecord = previewUsers.get(rawEmail);
-    if (!userRecord) {
-      const isAdminEmail =
-        rawEmail === (process.env.ADMIN_BOOTSTRAP_EMAIL || 'admin@ars_llm.local').toLowerCase() ||
-        rawEmail.startsWith('admin@');
-      const role: 'user' | 'admin' = isAdminEmail ? 'admin' : 'user';
-      userRecord = {
-        id: nextPreviewUserId++,
-        email: rawEmail,
-        name: deriveDefaultDisplayName(rawEmail, role),
-        role,
-        personalInstructions: '',
-        quotas: isAdminEmail
-          ? { daily: { used: 2, limit: 100 }, monthly: { used: 24, limit: 2000 } }
-          : { daily: { used: 4, limit: 20 }, monthly: { used: 38, limit: 500 } },
-      };
-      previewUsers.set(rawEmail, userRecord);
+    const userRecord = previewUsers.get(rawEmail);
+    if (!userRecord || !verifyPreviewPassword(rawPassword, userRecord.passwordHash)) {
+      res.status(401).json({
+        error: {
+          code: 'INVALID_CREDENTIALS',
+          message:
+            'Неверный корпоративный Email или пароль. Самостоятельная регистрация отключена — для получения доступа обратитесь к администратору.',
+        },
+      });
+      return;
+    }
+
+    if (!userRecord.is_active) {
+      res.status(403).json({
+        error: {
+          code: 'ACCOUNT_DISABLED',
+          message: 'Учётная запись заблокирована администратором.',
+        },
+      });
+      return;
     }
 
     const sessionToken = randomUUID();
@@ -824,6 +902,7 @@ async function startServer() {
         email: userRecord.email,
         name: userRecord.name,
         role: userRecord.role,
+        is_active: userRecord.is_active,
         quotas: userRecord.quotas,
       },
       quotas: userRecord.quotas,
@@ -832,9 +911,8 @@ async function startServer() {
   });
 
   app.post('/api/v1/auth/logout', (req: Request, res: Response) => {
-    const authHeader = req.headers.authorization;
-    if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
-      previewSessions.delete(authHeader.slice(7).trim());
+    for (const token of extractPreviewSessionTokens(req)) {
+      previewSessions.delete(token);
     }
     res.setHeader(
       'Set-Cookie',
@@ -858,6 +936,7 @@ async function startServer() {
         email: userRecord.email,
         name: userRecord.name,
         role: userRecord.role,
+        is_active: userRecord.is_active,
         quotas: userRecord.quotas,
       },
       quotas: userRecord.quotas,
@@ -889,47 +968,242 @@ async function startServer() {
   });
 
   // --- Admin API (/api/v1/admin/*) ---
-  app.get('/api/v1/admin/users', (req: Request, res: Response) => {
-    const actor = getPreviewSessionUser(req);
-    if (!actor) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
-      return;
-    }
-    if (actor.role !== 'admin') {
-      res.status(403).json({
+  app.post('/api/v1/admin/users', (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const rawName = typeof body.name === 'string' ? body.name.trim() : '';
+    const rawEmail = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';
+    const rawPassword = typeof body.password === 'string' ? body.password : '';
+    const rawRole = body.role === undefined ? 'employee' : body.role;
+    const rawDaily = body.daily_limit;
+    const rawMonthly = body.monthly_limit;
+
+    if (!rawName || rawName.length > 120) {
+      res.status(400).json({
         error: {
-          code: 'FORBIDDEN',
-          message: 'Недостаточно прав. Только администратор может управлять квотами.',
+          code: 'VALIDATION_ERROR',
+          message: 'Укажите имя сотрудника (от 1 до 120 символов).',
         },
       });
       return;
     }
-    const users = Array.from(previewUsers.values()).map((u) => ({
-      id: u.id,
-      email: u.email,
-      name: u.name,
-      role: u.role,
+
+    if (!rawEmail || rawEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail)) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Укажите корректный корпоративный Email.',
+        },
+      });
+      return;
+    }
+
+    if (rawPassword.length < 8 || rawPassword.length > 128) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Временный пароль должен содержать от 8 до 128 символов.',
+        },
+      });
+      return;
+    }
+
+    if (rawRole !== 'employee' && rawRole !== 'admin') {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Допустимые роли пользователя: employee или admin.',
+        },
+      });
+      return;
+    }
+
+    if (previewUsers.has(rawEmail)) {
+      res.status(409).json({
+        error: {
+          code: 'CONFLICT',
+          message: 'Пользователь с таким корпоративным Email уже существует.',
+        },
+      });
+      return;
+    }
+
+    const dailyLimit: number | null =
+      rawDaily === undefined || rawDaily === null
+        ? null
+        : typeof rawDaily === 'number' && Number.isInteger(rawDaily) && rawDaily >= 0
+          ? rawDaily
+          : NaN;
+    const monthlyLimit: number | null =
+      rawMonthly === undefined || rawMonthly === null
+        ? null
+        : typeof rawMonthly === 'number' && Number.isInteger(rawMonthly) && rawMonthly >= 0
+          ? rawMonthly
+          : NaN;
+
+    if (Number.isNaN(dailyLimit) || Number.isNaN(monthlyLimit)) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Лимиты должны быть целыми неотрицательными числами или null.',
+        },
+      });
+      return;
+    }
+
+    if (dailyLimit !== null && monthlyLimit !== null && monthlyLimit < dailyLimit) {
+      res.status(400).json({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Месячный лимит не может быть меньше дневного лимита.',
+        },
+      });
+      return;
+    }
+
+    const createdUser: PreviewUserRecord = {
+      id: nextPreviewUserId++,
+      email: rawEmail,
+      name: rawName,
+      role: rawRole,
+      is_active: true,
+      passwordHash: hashPreviewPassword(rawPassword),
       created_at: new Date().toISOString(),
-      quotas: u.quotas,
-    }));
+      personalInstructions: '',
+      quotas: {
+        daily: { used: 0, limit: dailyLimit },
+        monthly: { used: 0, limit: monthlyLimit },
+      },
+    };
+    previewUsers.set(createdUser.email, createdUser);
+
+    recordPreviewUsageEvent(actor, 'admin_user_created', {
+      target_user_id: createdUser.id,
+      role: createdUser.role,
+    });
+
+    res.status(201).json(toPublicPreviewUser(createdUser));
+  });
+
+  app.get('/api/v1/admin/users', (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+    const users = Array.from(previewUsers.values())
+      .sort((a, b) => a.id - b.id)
+      .map(toPublicPreviewUser);
     res.status(200).json({ users });
   });
 
-  app.get('/api/v1/admin/usage', (req: Request, res: Response) => {
-    const actor = getPreviewSessionUser(req);
-    if (!actor) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
+  app.get('/api/v1/admin/users/:id', (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Некорректный ID пользователя.' } });
       return;
     }
-    if (actor.role !== 'admin') {
-      res.status(403).json({
+
+    const targetUser = Array.from(previewUsers.values()).find((u) => u.id === targetId);
+    if (!targetUser) {
+      res.status(404).json({ error: { message: 'Пользователь не найден.' } });
+      return;
+    }
+
+    res.status(200).json(toPublicPreviewUser(targetUser));
+  });
+
+  app.patch('/api/v1/admin/users/:id', (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Некорректный ID пользователя.' } });
+      return;
+    }
+
+    const targetUser = Array.from(previewUsers.values()).find((u) => u.id === targetId);
+    if (!targetUser) {
+      res.status(404).json({ error: { message: 'Пользователь не найден.' } });
+      return;
+    }
+
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const { role, is_active } = body;
+
+    if (role !== undefined && role !== 'admin' && role !== 'employee') {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Допустимые роли: employee или admin.' } });
+      return;
+    }
+
+    if (is_active !== undefined && typeof is_active !== 'boolean') {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Поле is_active должно быть логического типа.' } });
+      return;
+    }
+
+    if (actor.id === targetUser.id && (is_active === false || (role !== undefined && role !== 'admin'))) {
+      res.status(400).json({
         error: {
-          code: 'FORBIDDEN',
-          message: 'Недостаточно прав. Только администратор может просматривать статистику.',
+          code: 'VALIDATION_ERROR',
+          message: 'Нельзя заблокировать или понизить собственную учётную запись администратора.',
         },
       });
       return;
     }
+
+    if (role !== undefined) {
+      targetUser.role = role;
+    }
+    if (is_active !== undefined) {
+      targetUser.is_active = is_active;
+      if (!is_active) {
+        revokePreviewSessionsForEmail(targetUser.email);
+      }
+      recordPreviewUsageEvent(
+        actor,
+        is_active ? 'admin_user_unblocked' : 'admin_user_blocked',
+        { target_user_id: targetUser.id }
+      );
+    }
+
+    previewUsers.set(targetUser.email, targetUser);
+    res.status(200).json(toPublicPreviewUser(targetUser));
+  });
+
+  app.delete('/api/v1/admin/users/:id', (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Некорректный ID пользователя.' } });
+      return;
+    }
+
+    if (actor.id === targetId) {
+      res.status(400).json({ error: { message: 'Нельзя деактивировать собственную учётную запись.' } });
+      return;
+    }
+
+    const targetUser = Array.from(previewUsers.values()).find((u) => u.id === targetId);
+    if (!targetUser) {
+      res.status(404).json({ error: { message: 'Пользователь не найден.' } });
+      return;
+    }
+
+    targetUser.is_active = false;
+    previewUsers.set(targetUser.email, targetUser);
+    revokePreviewSessionsForEmail(targetUser.email);
+    recordPreviewUsageEvent(actor, 'admin_user_blocked', { target_user_id: targetUser.id });
+    res.status(204).end();
+  });
+
+  app.get('/api/v1/admin/usage', (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
 
     const rawDays = parseInt(String(req.query.days ?? ''), 10);
     const days = Number.isFinite(rawDays) && rawDays > 0 ? Math.min(365, rawDays) : 30;
@@ -964,20 +1238,8 @@ async function startServer() {
   });
 
   app.put('/api/v1/admin/users/:id/quotas', (req: Request, res: Response) => {
-    const actor = getPreviewSessionUser(req);
-    if (!actor) {
-      res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Требуется вход в систему.' } });
-      return;
-    }
-    if (actor.role !== 'admin') {
-      res.status(403).json({
-        error: {
-          code: 'FORBIDDEN',
-          message: 'Недостаточно прав. Сотрудник не может изменять квоты запросов.',
-        },
-      });
-      return;
-    }
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
 
     const targetId = Number(req.params.id);
     const targetUser = Array.from(previewUsers.values()).find((u) => u.id === targetId);
@@ -1227,9 +1489,13 @@ async function startServer() {
       return;
     }
     const convId = Number(req.query.conversation_id);
+    if (!Number.isInteger(convId) || convId <= 0) {
+      res.status(400).json({ error: { message: 'Укажите корректный conversation_id.' } });
+      return;
+    }
     const conv = previewConversations.get(convId);
-    if (!conv || conv.user_id !== userRecord.id) {
-      res.status(200).json([]);
+    if (!conv || (userRecord.role !== 'admin' && conv.user_id !== userRecord.id)) {
+      res.status(404).json({ error: { message: 'Диалог не найден.' } });
       return;
     }
     res.status(200).json(conv.messages);
@@ -1252,6 +1518,10 @@ async function startServer() {
     }
 
     const existingConv = previewConversations.get(convId);
+    if (existingConv && existingConv.user_id !== userRecord.id) {
+      res.status(404).json({ error: { message: 'Диалог не найден.' } });
+      return;
+    }
     if (existingConv && existingConv.deleted_at) {
       res.status(409).json({
         error: { message: 'Нельзя отправлять сообщения в удалённый диалог. Сначала восстановите его.' },
@@ -1376,8 +1646,18 @@ async function startServer() {
       return;
     }
 
-    // Atomically check and reserve quota for authenticated session user BEFORE calling FreeLLMAPI
+    // Require authenticated active session BEFORE calling FreeLLMAPI (matches backend/src/routes/chat.ts)
     const sessionUser = getPreviewSessionUser(req);
+    if (!sessionUser) {
+      res.status(401).json({
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Сессия не авторизована или учётная запись заблокирована.',
+        },
+      });
+      return;
+    }
+
     let reservationSettled = false;
     const releasePreviewReservation = () => {
       if (!sessionUser || reservationSettled) return;

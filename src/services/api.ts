@@ -36,6 +36,7 @@ export interface AdminUserRecord {
   email: string;
   name?: string;
   role: UserRole;
+  is_active?: boolean;
   created_at: string;
   quotas: QuotaLimits;
 }
@@ -680,6 +681,47 @@ export const chatApi = {
 
 export const adminApi = {
   listUsers: () => request<{ users: AdminUserRecord[] }>('/admin/users'),
+
+  createUser: (payload: {
+    name: string;
+    email: string;
+    password: string;
+    role: 'employee' | 'admin';
+  }) =>
+    request<{
+      id: number;
+      name: string;
+      email: string;
+      role: UserRole;
+      is_active: boolean;
+      email_verified?: boolean;
+      created_at: string;
+      quotas?: QuotaLimits;
+    }>('/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  updateUser: (
+    userId: number,
+    payload: {
+      role?: 'employee' | 'admin';
+      is_active?: boolean;
+    }
+  ) =>
+    request<{
+      id: number;
+      name: string;
+      email: string;
+      role: UserRole;
+      is_active: boolean;
+      email_verified?: boolean;
+      created_at: string;
+      quotas?: QuotaLimits;
+    }>(`/admin/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }),
 
   getUserQuotas: (userId: number) =>
     request<{ user: { id: number; email: string; role: string }; quotas: QuotaLimits }>(
