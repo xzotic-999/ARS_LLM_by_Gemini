@@ -54,6 +54,54 @@ export interface AdminUsageResponse {
   }>;
 }
 
+export type FreeLlmConnectionState = 'connected' | 'degraded' | 'disconnected';
+
+export type FreeLlmAuthStatus = 'ok' | 'failed' | 'unconfigured';
+
+export type FreeLlmErrorCategory =
+  | 'dns_network_error'
+  | 'timeout'
+  | 'auth_error'
+  | 'rate_limit'
+  | 'upstream_5xx'
+  | 'model_routing_error'
+  | 'generation_error'
+  | 'config_error';
+
+export interface FreeLlmDiagnosticError {
+  category: FreeLlmErrorCategory;
+  label: string;
+  message: string;
+  httpStatus: number | null;
+}
+
+export interface FreeLlmHealthStatus {
+  status: FreeLlmConnectionState;
+  apiAvailable: boolean;
+  authStatus: FreeLlmAuthStatus;
+  modelsAvailable: boolean;
+  modelCount: number;
+  availableModelsSample: string[];
+  configuredModel: string;
+  endpointHost: string | null;
+  httpStatus: number | null;
+  latencyMs: number;
+  checkedAt: string;
+  lastError: FreeLlmDiagnosticError | null;
+}
+
+export interface FreeLlmGenerationTestResult {
+  success: boolean;
+  status: FreeLlmConnectionState;
+  endpointUsed: 'primary' | 'fallback' | null;
+  route: string | null;
+  modelUsed: string | null;
+  httpStatus: number | null;
+  latencyMs: number;
+  checkedAt: string;
+  error: FreeLlmDiagnosticError | null;
+}
+
 export interface ApiErrorDetails {
   code?: string;
   reason?: 'daily_limit_exceeded' | 'monthly_limit_exceeded' | string;
@@ -749,4 +797,11 @@ export const adminApi = {
     const qs = query.toString();
     return request<AdminUsageResponse>(`/admin/usage${qs ? `?${qs}` : ''}`);
   },
+
+  getFreeLlmHealth: () => request<FreeLlmHealthStatus>('/admin/freellm/health'),
+
+  testFreeLlmGeneration: () =>
+    request<FreeLlmGenerationTestResult>('/admin/freellm/test-generation', {
+      method: 'POST',
+    }),
 };

@@ -1530,3 +1530,127 @@ export function evaluateQuotaBlockStatus(
     contactAdminHint: null,
   };
 }
+
+export const FREELM_HEALTH_POLL_INTERVAL_MS = 60_000;
+
+export function formatFreeLlmConnectionState(
+  status: 'connected' | 'degraded' | 'disconnected' | null | undefined
+): {
+  badgeText: 'Connected' | 'Degraded' | 'Disconnected' | 'Checking';
+  subtitle: string;
+  tone: 'emerald' | 'amber' | 'red' | 'slate';
+} {
+  switch (status) {
+    case 'connected':
+      return {
+        badgeText: 'Connected',
+        subtitle: 'Шлюз FreeLLMAPI доступен, авторизация подтверждена',
+        tone: 'emerald',
+      };
+    case 'degraded':
+      return {
+        badgeText: 'Degraded',
+        subtitle: 'Обнаружены задержки, проблемы маршрутизации или генерации',
+        tone: 'amber',
+      };
+    case 'disconnected':
+      return {
+        badgeText: 'Disconnected',
+        subtitle: 'Шлюз FreeLLMAPI недоступен или авторизация отклонена',
+        tone: 'red',
+      };
+    default:
+      return {
+        badgeText: 'Checking',
+        subtitle: 'Выполняется диагностика подключения...',
+        tone: 'slate',
+      };
+  }
+}
+
+export function formatFreeLlmAuthLabel(
+  authStatus: 'ok' | 'failed' | 'unconfigured' | null | undefined
+): string {
+  switch (authStatus) {
+    case 'ok':
+      return 'Успешна';
+    case 'unconfigured':
+      return 'Ключ не настроен';
+    case 'failed':
+      return 'Отклонена / ошибка туннеля';
+    default:
+      return '—';
+  }
+}
+
+export function formatFreeLlmLatency(latencyMs: number | null | undefined): string {
+  if (typeof latencyMs !== 'number' || !Number.isFinite(latencyMs) || latencyMs < 0) {
+    return '—';
+  }
+  return `${Math.round(latencyMs)} мс`;
+}
+
+export function formatFreeLlmTimestamp(isoString: string | null | undefined): string {
+  if (!isoString) return '—';
+  const parsed = new Date(isoString);
+  if (Number.isNaN(parsed.getTime())) return isoString;
+  return parsed.toLocaleString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+export function resolveCombinedInfraState<
+  THealth extends {
+    status: 'connected' | 'degraded' | 'disconnected';
+    checkedAt: string;
+    lastError: { category: string; label: string; message: string; httpStatus: number | null } | null;
+  },
+  TGen extends {
+    success: boolean;
+    status: 'connected' | 'degraded' | 'disconnected';
+    checkedAt: string;
+    error: { category: string; label: string; message: string; httpStatus: number | null } | null;
+  },
+>(
+  health: THealth | null,
+  lastGenTest: TGen | null
+): {
+  status: 'connected' | 'degraded' | 'disconnected';
+  lastError: { category: string; label: string; message: string; httpStatus: number | null } | null;
+} | null {
+  if (!health) {
+    if (!lastGenTest) return null;
+    return {
+      status: lastGenTest.status,
+      lastError: lastGenTest.error,
+    };
+  }
+
+  if (lastGenTest && !lastGenTest.success) {
+    const healthMs = new Date(health.checkedAt).getTime();
+    const genMs = new Date(lastGenTest.checkedAt).getTime();
+    const genIsNotOlder =
+      Number.isNaN(healthMs) || Number.isNaN(genMs) || genMs >= healthMs;
+
+    if (genIsNotOlder) {
+      const effectiveStatus =
+        health.status === 'disconnected' || lastGenTest.status === 'disconnected'
+          ? 'disconnected'
+          : 'degraded';
+      return {
+        status: effectiveStatus,
+        lastError: health.lastError ?? lastGenTest.error,
+      };
+    }
+  }
+
+  return {
+    status: health.status,
+    lastError: health.lastError,
+  };
+}

@@ -14,6 +14,10 @@ import {
   fetchExchangeRatesData,
   resolveAndEnrichMessagesWithExternalTools,
 } from './backend/src/services/externalTools.ts';
+import {
+  checkFreeLlmHealth,
+  testFreeLlmGeneration,
+} from './backend/src/services/freeLlmDiagnostics.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1306,6 +1310,26 @@ async function startServer() {
       quotas: targetUser.quotas,
       message: 'Quota limits updated.',
     });
+  });
+
+  app.get('/api/v1/admin/freellm/health', async (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadRuntimeConfig();
+    const health = await checkFreeLlmHealth(cfg);
+    res.status(200).json(health);
+  });
+
+  app.post('/api/v1/admin/freellm/test-generation', async (req: Request, res: Response) => {
+    const actor = requirePreviewAdmin(req, res);
+    if (!actor) return;
+
+    res.setHeader('Cache-Control', 'no-store');
+    const cfg = loadRuntimeConfig();
+    const result = await testFreeLlmGeneration(cfg);
+    res.status(200).json(result);
   });
 
   app.patch('/api/v1/auth/profile', async (req: Request, res: Response) => {

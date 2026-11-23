@@ -7,6 +7,10 @@ import {
   getUserQuotaLimits,
 } from "../services/quota.js";
 import { hashPassword } from "../services/password.js";
+import {
+  checkProductionFreeLlmHealth,
+  testProductionFreeLlmGeneration,
+} from "../services/freeLlm.js";
 
 const router = Router();
 
@@ -331,6 +335,28 @@ router.get("/usage", async (req, res, next) => {
       daily: dailyRes.rows,
       events: eventsRes.rows,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/v1/admin/freellm/health — lightweight FreeLLMAPI status check (GET /models only, admin only)
+router.get("/freellm/health", async (_req, res, next) => {
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    const health = await checkProductionFreeLlmHealth();
+    res.json(health);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/v1/admin/freellm/test-generation — manual minimal generation probe (admin only)
+router.post("/freellm/test-generation", async (_req, res, next) => {
+  try {
+    res.setHeader("Cache-Control", "no-store");
+    const result = await testProductionFreeLlmGeneration();
+    res.json(result);
   } catch (err) {
     next(err);
   }

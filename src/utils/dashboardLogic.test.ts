@@ -1408,6 +1408,74 @@ test('Admin user creation validation and block/unblock status guards enforce cor
   assert.equal(formatUserAccountStatus(false), 'Заблокирована');
 });
 
+test('FreeLLM infrastructure monitoring helpers format states, 60s poll interval, and resolve combined health + generation test status', async () => {
+  const {
+    FREELM_HEALTH_POLL_INTERVAL_MS,
+    formatFreeLlmConnectionState,
+    formatFreeLlmAuthLabel,
+    formatFreeLlmLatency,
+    resolveCombinedInfraState,
+  } = await import('./dashboardLogic');
+
+  assert.equal(FREELM_HEALTH_POLL_INTERVAL_MS, 60_000);
+  assert.equal(formatFreeLlmConnectionState('connected').badgeText, 'Connected');
+  assert.equal(formatFreeLlmConnectionState('degraded').badgeText, 'Degraded');
+  assert.equal(formatFreeLlmConnectionState('disconnected').badgeText, 'Disconnected');
+  assert.equal(formatFreeLlmConnectionState(null).badgeText, 'Checking');
+
+  assert.equal(formatFreeLlmAuthLabel('ok'), 'Успешна');
+  assert.equal(formatFreeLlmAuthLabel('unconfigured'), 'Ключ не настроен');
+  assert.equal(formatFreeLlmAuthLabel('failed'), 'Отклонена / ошибка туннеля');
+
+  assert.equal(formatFreeLlmLatency(142.4), '142 мс');
+  assert.equal(formatFreeLlmLatency(null), '—');
+
+  // Combined state: healthy GET /models + failed newer generation test -> Degraded with generation error
+  const combinedDegraded = resolveCombinedInfraState(
+    {
+      status: 'connected',
+      checkedAt: '2026-11-23T09:00:00.000Z',
+      lastError: null,
+    },
+    {
+      success: false,
+      status: 'degraded',
+      checkedAt: '2026-11-23T09:00:10.000Z',
+      error: {
+        category: 'upstream_5xx',
+        label: 'Внутренняя ошибка шлюза FreeLLMAPI (5xx)',
+        message: 'Сервер вернул 502',
+        httpStatus: 502,
+      },
+    }
+  );
+  assert.equal(combinedDegraded?.status, 'degraded');
+  assert.equal(combinedDegraded?.lastError?.category, 'upstream_5xx');
+
+  // Combined state: newer healthy GET /models supersedes older generation failure
+  const combinedRecovered = resolveCombinedInfraState(
+    {
+      status: 'connected',
+      checkedAt: '2026-11-23T09:02:00.000Z',
+      lastError: null,
+    },
+    {
+      success: false,
+      status: 'degraded',
+      checkedAt: '2026-11-23T09:00:10.000Z',
+      error: {
+        category: 'upstream_5xx',
+        label: '5xx',
+        message: 'Old error',
+        httpStatus: 502,
+      },
+    }
+  );
+  assert.equal(combinedRecovered?.status, 'connected');
+  assert.equal(combinedRecovered?.lastError, null);
+});
+
+
 
 
 

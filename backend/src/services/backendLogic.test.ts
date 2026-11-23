@@ -2392,6 +2392,70 @@ test("Conversations archive/soft-delete status filter and additive migration 006
   assert.ok(!/\b(DROP|TRUNCATE|DELETE)\b/i.test(migrationSql), "Migration 006 must be strictly additive");
 });
 
+test("FreeLLMAPI monitoring health check, manual generation test, error classification, and admin route protection", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const {
+    checkFreeLlmHealth,
+    testFreeLlmGeneration,
+  } = await import("./freeLlmDiagnostics.js");
+
+  const secretKey = "sk-prod-freellm-monitor-secret-8899";
+
+  // 1. Health check calls ONLY GET /models and never leaks API key
+  const healthCalls: Array<{ url: string; method: string }> = [];
+  const okHealth = await checkFreeLlmHealth(
+    {
+      FREELLM_API_BASE_URL: "https://gateway.company.kz/v1",
+      FREELLM_API_KEY: secretKey,
+      FREELLM_MODEL: "auto",
+    },
+    async (input, init) => {
+      healthCalls.push({ url: String(input), method: init?.method ?? "GET" });
+      return new Response(
+        JSON.stringify({ data: [{ id: "auto" }, { id: "gpt-4o-mini" }] }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }
+  );
+  assert.equal(healthCalls.length, 1);
+  assert.equal(healthCalls[0].method, "GET");
+  assert.equal(okHealth.status, "connected");
+  assert.equal(okHealth.apiAvailable, true);
+  assert.equal(okHealth.authStatus, "ok");
+  assert.equal(okHealth.modelsAvailable, true);
+  assert.ok(!JSON.stringify(okHealth).includes(secretKey));
+
+  // 2. Manual generation test returns route, model, latency, HTTP status, and error classification
+  const genFail = await testFreeLlmGeneration(
+    {
+      FREELLM_API_BASE_URL: "https://gateway.company.kz/v1",
+      FREELLM_API_KEY: secretKey,
+      FREELLM_MODEL: "auto",
+    },
+    async () =>
+      new Response(JSON.stringify({ error: { message: `Bad Gateway for Bearer ${secretKey}` } }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      })
+  );
+  assert.equal(genFail.success, false);
+  assert.equal(genFail.route, "/v1/chat/completions");
+  assert.equal(genFail.httpStatus, 502);
+  assert.equal(genFail.error?.category, "upstream_5xx");
+  assert.ok(!JSON.stringify(genFail).includes(secretKey));
+
+  // 3. Verify backend/src/routes/admin.ts protects /freellm/health and /freellm/test-generation via router.use(requireAdmin)
+  const adminRoutesSrc = readFileSync(
+    resolve(process.cwd(), "backend/src/routes/admin.ts"),
+    "utf-8"
+  );
+  assert.ok(adminRoutesSrc.includes("router.use(requireAdmin)"));
+  assert.ok(adminRoutesSrc.includes('router.get("/freellm/health"'));
+  assert.ok(adminRoutesSrc.includes('router.post("/freellm/test-generation"'));
+});
+
+
 
 
 

@@ -24,11 +24,20 @@ import {
   UserCheck,
   Eye,
   EyeOff,
+  Activity,
+  CheckCircle2,
+  AlertTriangle,
+  XCircle,
+  Play,
+  Server,
+  KeyRound,
+  Cpu,
 } from 'lucide-react';
 import {
   ChatSession,
   DEFAULT_ADMIN_USERS,
   DocumentItem,
+  FREELM_HEALTH_POLL_INTERVAL_MS,
   ModelParameters,
   NavSectionId,
   ProjectItem,
@@ -37,9 +46,14 @@ import {
   canConfigureQuotas,
   canToggleUserActiveStatus,
   deduplicateSessions,
+  formatFreeLlmAuthLabel,
+  formatFreeLlmConnectionState,
+  formatFreeLlmLatency,
+  formatFreeLlmTimestamp,
   formatUserAccountStatus,
   formatUserRoleLabel,
   getInitialAdminPanelState,
+  resolveCombinedInfraState,
   validateAdminCreateUserInput,
   validateModelParameters,
   validateProfileUpdate,
@@ -48,6 +62,8 @@ import {
   adminApi,
   AdminUserRecord,
   AdminUsageResponse,
+  FreeLlmGenerationTestResult,
+  FreeLlmHealthStatus,
   QuotaLimits,
   StreamMetrics,
   UserProfile,
@@ -151,6 +167,12 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
   const [createUserError, setCreateUserError] = useState<string | null>(null);
   const [creatingUser, setCreatingUser] = useState(false);
   const [togglingUserId, setTogglingUserId] = useState<number | null>(null);
+  const [freeLlmHealth, setFreeLlmHealth] = useState<FreeLlmHealthStatus | null>(null);
+  const [freeLlmHealthLoading, setFreeLlmHealthLoading] = useState(false);
+  const [freeLlmHealthFetchError, setFreeLlmHealthFetchError] = useState<string | null>(null);
+  const [freeLlmGenTest, setFreeLlmGenTest] = useState<FreeLlmGenerationTestResult | null>(null);
+  const [freeLlmGenTesting, setFreeLlmGenTesting] = useState(false);
+  const [freeLlmGenTestFetchError, setFreeLlmGenTestFetchError] = useState<string | null>(null);
 
   const syncDraftsFromUsers = (usersList: AdminUserRecord[]) => {
     const drafts: Record<number, { daily: string; monthly: string }> = {};
@@ -209,6 +231,74 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
     }
   };
 
+  const loadFreeLlmHealth = async () => {
+    if (!isAdmin) return;
+    setFreeLlmHealthLoading(true);
+    setFreeLlmHealthFetchError(null);
+    if (isDemoMode) {
+      setFreeLlmHealth({
+        status: 'connected',
+        apiAvailable: true,
+        authStatus: 'ok',
+        modelsAvailable: true,
+        modelCount: 3,
+        availableModelsSample: ['auto', 'gpt-4o-mini', 'claude-3.5-sonnet'],
+        configuredModel: 'auto',
+        endpointHost: 'demo-freellm.local',
+        httpStatus: 200,
+        latencyMs: 118,
+        checkedAt: new Date().toISOString(),
+        lastError: null,
+      });
+      setFreeLlmHealthLoading(false);
+      return;
+    }
+
+    try {
+      const healthRes = await adminApi.getFreeLlmHealth();
+      setFreeLlmHealth(healthRes);
+    } catch (err) {
+      setFreeLlmHealthFetchError(
+        err instanceof Error ? err.message : 'Не удалось выполнить проверку состояния FreeLLMAPI.'
+      );
+    } finally {
+      setFreeLlmHealthLoading(false);
+    }
+  };
+
+  const handleRunFreeLlmGenerationTest = async () => {
+    if (!isAdmin || freeLlmGenTesting) return;
+    setFreeLlmGenTesting(true);
+    setFreeLlmGenTestFetchError(null);
+
+    if (isDemoMode) {
+      setFreeLlmGenTest({
+        success: true,
+        status: 'connected',
+        endpointUsed: 'primary',
+        route: '/v1/chat/completions',
+        modelUsed: 'auto',
+        httpStatus: 200,
+        latencyMs: 342,
+        checkedAt: new Date().toISOString(),
+        error: null,
+      });
+      setFreeLlmGenTesting(false);
+      return;
+    }
+
+    try {
+      const testRes = await adminApi.testFreeLlmGeneration();
+      setFreeLlmGenTest(testRes);
+    } catch (err) {
+      setFreeLlmGenTestFetchError(
+        err instanceof Error ? err.message : 'Не удалось выполнить тест генерации FreeLLMAPI.'
+      );
+    } finally {
+      setFreeLlmGenTesting(false);
+    }
+  };
+
   useEffect(() => {
     if (!isDemoMode) {
       setAdminUsers([]);
@@ -219,6 +309,21 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
     if (activeNav === 'admin' && isAdmin) {
       loadAdminData();
     }
+  }, [activeNav, isDemoMode, isAdmin]);
+
+  useEffect(() => {
+    if (activeNav !== 'admin' || !isAdmin) {
+      return;
+    }
+
+    void loadFreeLlmHealth();
+    const intervalId = window.setInterval(() => {
+      void loadFreeLlmHealth();
+    }, FREELM_HEALTH_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
   }, [activeNav, isDemoMode, isAdmin]);
 
   useEffect(() => {
@@ -688,6 +793,290 @@ export const WorkspaceSectionView: React.FC<SecondaryViewProps> = ({
             )}
           </div>
         )}
+
+        {/* Section «Состояние AI-инфраструктуры» (FreeLLMAPI monitoring) */}
+        {(() => {
+          const combinedState = resolveCombinedInfraState(freeLlmHealth, freeLlmGenTest);
+          const stateMeta = formatFreeLlmConnectionState(combinedState?.status ?? null);
+          const displayError = combinedState?.lastError ?? null;
+
+          const statusBannerClasses =
+            stateMeta.tone === 'emerald'
+              ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-800 dark:text-emerald-200'
+              : stateMeta.tone === 'amber'
+                ? 'border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30 text-amber-800 dark:text-amber-200'
+                : stateMeta.tone === 'red'
+                  ? 'border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/30 text-red-800 dark:text-red-200'
+                  : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/50 text-slate-700 dark:text-slate-200';
+
+          return (
+            <section
+              aria-label="Состояние AI-инфраструктуры"
+              className="border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden bg-white dark:bg-[#131829]"
+            >
+              <div className="px-5 py-4 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex-1 min-w-[260px]">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <Activity className="w-4.5 h-4.5 text-indigo-600 dark:text-indigo-400 shrink-0" aria-hidden="true" />
+                    <h3 className="text-[15.5px] font-bold text-slate-900 dark:text-slate-100">
+                      Состояние AI-инфраструктуры
+                    </h3>
+                    <span
+                      data-testid="freellm-overall-status"
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg border text-[12px] font-semibold ${statusBannerClasses}`}
+                    >
+                      {stateMeta.tone === 'emerald' && (
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      )}
+                      {stateMeta.tone === 'amber' && (
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      )}
+                      {stateMeta.tone === 'red' && (
+                        <XCircle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      )}
+                      {stateMeta.tone === 'slate' && (
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin shrink-0" aria-hidden="true" />
+                      )}
+                      <span>{stateMeta.badgeText}</span>
+                    </span>
+                  </div>
+                  <p className="text-[12.5px] text-slate-500 dark:text-slate-400 mt-1">
+                    Мониторинг подключения к FreeLLMAPI (GET /models каждые 60 сек.)
+                    {freeLlmHealth?.endpointHost ? (
+                      <>
+                        {' · '}Шлюз:{' '}
+                        <span className="font-mono text-slate-700 dark:text-slate-300">
+                          {freeLlmHealth.endpointHost}
+                        </span>
+                      </>
+                    ) : null}
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void loadFreeLlmHealth()}
+                    disabled={freeLlmHealthLoading}
+                    className="focus-ring inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-[12.5px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 disabled:opacity-60 whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3.5 h-3.5 ${freeLlmHealthLoading ? 'animate-spin' : ''}`}
+                      aria-hidden="true"
+                    />
+                    <span>Обновить статус</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void handleRunFreeLlmGenerationTest()}
+                    disabled={freeLlmGenTesting}
+                    className="focus-ring inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#4F46E5] hover:bg-[#4338CA] disabled:opacity-60 text-white text-[12.5px] font-semibold transition-colors whitespace-nowrap"
+                  >
+                    <Play
+                      className={`w-3.5 h-3.5 ${freeLlmGenTesting ? 'animate-pulse' : ''}`}
+                      aria-hidden="true"
+                    />
+                    <span>{freeLlmGenTesting ? 'Проверка...' : 'Тест генерации'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {freeLlmHealthFetchError && (
+                <div
+                  role="alert"
+                  className="mx-5 mt-4 p-3 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[12.5px] text-red-700 dark:text-red-300 flex items-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{freeLlmHealthFetchError}</span>
+                </div>
+              )}
+
+              <div className="p-5 space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  {/* 1. Доступность API */}
+                  <div className="p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-[#0E1322]/60 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-slate-500 dark:text-slate-400">
+                      <Server className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Доступность API</span>
+                    </div>
+                    <div className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
+                      {freeLlmHealth
+                        ? freeLlmHealth.apiAvailable
+                          ? 'Доступен'
+                          : 'Недоступен'
+                        : freeLlmHealthLoading
+                          ? 'Проверка...'
+                          : '—'}
+                    </div>
+                    <div className="text-[11.5px] text-slate-500 dark:text-slate-400 tabular-nums">
+                      HTTP: {freeLlmHealth?.httpStatus ?? '—'}
+                    </div>
+                  </div>
+
+                  {/* 2. Авторизация API-ключом */}
+                  <div className="p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-[#0E1322]/60 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-slate-500 dark:text-slate-400">
+                      <KeyRound className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Авторизация API-ключом</span>
+                    </div>
+                    <div className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
+                      {freeLlmHealth ? formatFreeLlmAuthLabel(freeLlmHealth.authStatus) : '—'}
+                    </div>
+                    <div className="text-[11.5px] text-slate-500 dark:text-slate-400">
+                      Ключ хранится только на сервере
+                    </div>
+                  </div>
+
+                  {/* 3. Доступность генерации моделей */}
+                  <div className="p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-[#0E1322]/60 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-slate-500 dark:text-slate-400">
+                      <Cpu className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Доступность моделей</span>
+                    </div>
+                    <div className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
+                      {freeLlmHealth
+                        ? freeLlmHealth.modelsAvailable
+                          ? `Доступна (${freeLlmHealth.modelCount})`
+                          : 'Недоступна'
+                        : '—'}
+                    </div>
+                    <div className="text-[11.5px] text-slate-500 dark:text-slate-400 font-mono truncate">
+                      Модель: {freeLlmHealth?.configuredModel ?? '—'}
+                    </div>
+                  </div>
+
+                  {/* 4. Время ответа */}
+                  <div className="p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-[#0E1322]/60 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-slate-500 dark:text-slate-400">
+                      <Clock className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Время ответа</span>
+                    </div>
+                    <div className="text-[16px] font-bold text-slate-900 dark:text-white tabular-nums">
+                      {freeLlmHealth ? formatFreeLlmLatency(freeLlmHealth.latencyMs) : '—'}
+                    </div>
+                    <div className="text-[11.5px] text-slate-500 dark:text-slate-400">
+                      Проверка GET /models
+                    </div>
+                  </div>
+
+                  {/* 5. Время последней проверки */}
+                  <div className="p-3.5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/60 dark:bg-[#0E1322]/60 space-y-1">
+                    <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-slate-500 dark:text-slate-400">
+                      <RefreshCw className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                      <span>Последняя проверка</span>
+                    </div>
+                    <div className="text-[13.5px] font-semibold text-slate-900 dark:text-slate-100 tabular-nums">
+                      {freeLlmHealth ? formatFreeLlmTimestamp(freeLlmHealth.checkedAt) : '—'}
+                    </div>
+                    <div className="text-[11.5px] text-slate-500 dark:text-slate-400">
+                      Автоинтервал: 60 сек.
+                    </div>
+                  </div>
+                </div>
+
+                {/* 6. Последняя ошибка (если есть) */}
+                <div
+                  className={`p-3.5 rounded-xl border text-[12.5px] space-y-1 ${
+                    displayError
+                      ? 'border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/30 text-red-800 dark:text-red-200'
+                      : 'border-slate-200/80 dark:border-slate-800 bg-slate-50/50 dark:bg-[#0E1322]/50 text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold flex items-center gap-1.5">
+                      {displayError ? (
+                        <AlertCircle className="w-4 h-4 shrink-0 text-red-600 dark:text-red-400" aria-hidden="true" />
+                      ) : (
+                        <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                      )}
+                      <span>
+                        Последняя ошибка:{' '}
+                        {displayError ? displayError.label : 'Ошибок подключения не зафиксировано'}
+                      </span>
+                    </div>
+                    {displayError && (
+                      <div className="font-mono text-[11.5px] px-2 py-0.5 rounded-md border border-red-200 dark:border-red-800/70 bg-white/70 dark:bg-red-950/50 tabular-nums shrink-0">
+                        {displayError.category}
+                        {displayError.httpStatus ? ` · HTTP ${displayError.httpStatus}` : ''}
+                      </div>
+                    )}
+                  </div>
+                  {displayError && (
+                    <div className="text-[12.5px] opacity-95 pl-5.5">
+                      {displayError.message}
+                    </div>
+                  )}
+                </div>
+
+                {/* Manual Generation Test Result (only rendered after manual button click) */}
+                {freeLlmGenTestFetchError && (
+                  <div
+                    role="alert"
+                    className="p-3 rounded-xl border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-950/40 text-[12.5px] text-red-700 dark:text-red-300 flex items-center gap-2"
+                  >
+                    <AlertCircle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>{freeLlmGenTestFetchError}</span>
+                  </div>
+                )}
+
+                {freeLlmGenTest && (
+                  <div
+                    data-testid="freellm-generation-test-result"
+                    className={`p-3.5 rounded-xl border text-[12.5px] space-y-2 ${
+                      freeLlmGenTest.success
+                        ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/60 dark:bg-emerald-950/25 text-emerald-900 dark:text-emerald-100'
+                        : 'border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/25 text-amber-900 dark:text-amber-100'
+                    }`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold flex items-center gap-1.5">
+                        {freeLlmGenTest.success ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" aria-hidden="true" />
+                        ) : (
+                          <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" aria-hidden="true" />
+                        )}
+                        <span>
+                          Результат ручного теста генерации:{' '}
+                          {freeLlmGenTest.success ? 'Генерация работает корректно' : 'Ошибка генерации'}
+                        </span>
+                      </div>
+                      <span className="text-[11.5px] opacity-80 tabular-nums">
+                        {formatFreeLlmTimestamp(freeLlmGenTest.checkedAt)}
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-x-5 gap-y-1 text-[12px] tabular-nums">
+                      <span>
+                        Маршрут:{' '}
+                        <strong className="font-mono">{freeLlmGenTest.route ?? '—'}</strong>
+                        {freeLlmGenTest.endpointUsed ? ` (${freeLlmGenTest.endpointUsed})` : ''}
+                      </span>
+                      <span>
+                        Модель:{' '}
+                        <strong className="font-mono">{freeLlmGenTest.modelUsed ?? '—'}</strong>
+                      </span>
+                      <span>
+                        Задержка:{' '}
+                        <strong>{formatFreeLlmLatency(freeLlmGenTest.latencyMs)}</strong>
+                      </span>
+                      <span>
+                        HTTP:{' '}
+                        <strong>{freeLlmGenTest.httpStatus ?? '—'}</strong>
+                      </span>
+                    </div>
+
+                    {freeLlmGenTest.error && (
+                      <div className="text-[12px] opacity-95">
+                        <strong>{freeLlmGenTest.error.label}:</strong> {freeLlmGenTest.error.message}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
+          );
+        })()}
 
         {/* Section «Пользователи»: Create user, assign employee role & limits, block/unblock, edit quotas */}
         {(isDemoMode || adminLoaded) && (

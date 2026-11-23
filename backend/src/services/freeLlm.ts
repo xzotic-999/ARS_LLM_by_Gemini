@@ -1,4 +1,13 @@
 import env from "../config/index.js";
+import {
+  checkFreeLlmHealth,
+  testFreeLlmGeneration,
+  type FreeLlmHealthResult,
+  type FreeLlmGenerationTestResult,
+  type FreeLlmDiagnosticConfig,
+} from "./freeLlmDiagnostics.js";
+
+export * from "./freeLlmDiagnostics.js";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -775,4 +784,52 @@ export async function verifyFreeLlmConnection(
     modelsCheck,
     completionCheck,
   };
+}
+
+export async function checkProductionFreeLlmHealth(
+  customConfig?: Partial<FreeLlmDiagnosticConfig>,
+  fetchFn: typeof fetch = fetch
+): Promise<FreeLlmHealthResult> {
+  return checkFreeLlmHealth(
+    {
+      FREELLM_API_BASE_URL:
+        customConfig?.FREELLM_API_BASE_URL ?? env.FREELLM_API_BASE_URL,
+      FREELLM_API_KEY: customConfig?.FREELLM_API_KEY ?? env.FREELLM_API_KEY,
+      FREELLM_MODEL: customConfig?.FREELLM_MODEL ?? env.FREELLM_MODEL,
+      FREELLM_TIMEOUT_MS:
+        customConfig?.FREELLM_TIMEOUT_MS ?? env.FREELLM_TIMEOUT_MS,
+      FREELLM_FALLBACK_BASE_URL:
+        customConfig?.FREELLM_FALLBACK_BASE_URL ??
+        env.FREELLM_FALLBACK_BASE_URL,
+      FREELLM_FALLBACK_API_KEY:
+        customConfig?.FREELLM_FALLBACK_API_KEY ?? env.FREELLM_FALLBACK_API_KEY,
+      FREELLM_FALLBACK_MODEL:
+        customConfig?.FREELLM_FALLBACK_MODEL ?? env.FREELLM_FALLBACK_MODEL,
+    },
+    fetchFn
+  );
+}
+
+export async function testProductionFreeLlmGeneration(
+  customConfig?: Partial<FreeLlmDiagnosticConfig>,
+  fetchFn: typeof fetch = fetch
+): Promise<FreeLlmGenerationTestResult> {
+  return testFreeLlmGeneration(
+    {
+      FREELLM_API_BASE_URL:
+        customConfig?.FREELLM_API_BASE_URL ?? env.FREELLM_API_BASE_URL,
+      FREELLM_API_KEY: customConfig?.FREELLM_API_KEY ?? env.FREELLM_API_KEY,
+      FREELLM_MODEL: customConfig?.FREELLM_MODEL ?? env.FREELLM_MODEL,
+      FREELLM_TIMEOUT_MS:
+        customConfig?.FREELLM_TIMEOUT_MS ?? env.FREELLM_TIMEOUT_MS,
+      FREELLM_FALLBACK_BASE_URL:
+        customConfig?.FREELLM_FALLBACK_BASE_URL ??
+        env.FREELLM_FALLBACK_BASE_URL,
+      FREELLM_FALLBACK_API_KEY:
+        customConfig?.FREELLM_FALLBACK_API_KEY ?? env.FREELLM_FALLBACK_API_KEY,
+      FREELLM_FALLBACK_MODEL:
+        customConfig?.FREELLM_FALLBACK_MODEL ?? env.FREELLM_FALLBACK_MODEL,
+    },
+    fetchFn
+  );
 }
